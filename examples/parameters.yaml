@@ -1,0 +1,49 @@
+
+parameters:
+
+  reduction_diffusion:
+    name: 'METRX_D_EFF_REDUCTION'
+    target: 'siteparameters'
+    distribution: 'uniform'
+    minvalue: 0.5
+    maxvalue: 1.0
+    initialvalue: 1.0
+    step: 0.1
+
+#  wateruseefficiency:
+#    name: [ 'WIWH', 'WUECMAX' ]
+#    target: 'speciesparameters'
+#    distribution: 'uniform'
+#    minvalue: 3.0
+#    maxvalue: 10.0
+#    initialvalue: 6.0
+#
+#  mobilesoilchemistrymodules:
+#    name: 'id'
+#    target: 'setup'
+#    distribution: 'uniform'
+#    values: [ 'soilchemistry:dndc', 'soilchemistry:metrx', 'soilchemistry:deconit' ]
+#
+#  wiltingpoint:
+#    name: 'wcmin'
+#    target: 'site'
+#    distribution: 'uniform'
+#    minvalue: [ 10.0, 50.0 ]
+#    maxvalue: [ 150.0, 200.0 ]
+#    initialvalue: [ 50.0, 150.0 ]
+#    numvalues: 12                           ## generate 12 values starting at index 0
+#    interpolation: { kind: 'linear' }  ## { random, linear, .. }
+#    #constraints: { fieldcapacity: '<' }
+#
+#  fieldcapacity:
+#    name: 'wcmax'
+#    target: 'site'
+#    distribution: 'uniform'
+#    minvalue: [ 450.0, 210.0 ]
+#    maxvalue: [ 650.0, 450.0 ]
+#    initialvalue: [ 500.0, 300.0 ]
+#    numvalues: [ 2, 5 ]                     ## generate 5 values starting at index 2
+#    interpolation: { kind: 'linear' }
+#    #constraints: { wiltingpoint: '>' }
+#
+#

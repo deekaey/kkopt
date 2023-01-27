@@ -1,0 +1,6 @@
+kkplot.egg-info
+
+.DS_Store
+*.swp
+
+__pycache__

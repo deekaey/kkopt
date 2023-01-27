@@ -1,0 +1,48 @@
+
+include:
+  - '${KKPLOT_DATADIR}/mesocosm/rohe-incubation/rohe-incubation_plotscripts/rohe-incubation_sources.yaml'
+
+configuration:
+
+  sampletime: '2021-01-02->2021-01-09'
+
+  repititions: 3
+
+  model: { binary: '/Users/kraus-d/local/clang-release/bin/ldndc', 
+           arguments: [ '-c /Users/kraus-d/.ldndc/release/ldndc_model_inputs.conf', 
+                        '/Users/kraus-d/model-inputs/mesocosm/rohe-incubation/rohe-incubation-giessen.ldndc' ] }
+
+  method: 'mcmc'
+  likelihood: 'r2'
+  parameterdistribution: 'uniform'
+  parameters: 'examples/parameters.yaml'
+
+  output: 'parameters.db'
+  outputformat: 'csv'
+
+  parallel: 'mpi'
+
+define:
+  C: 10.0
+
+
+
+calibrations:
+
+  - cal_1:
+      title: 'co2'
+      sampletime: '2021-01-02->2021-01-09'
+      configuration: { method: 'lhs', likelihood: 'rmse' }
+      simulation:  'daymean(sC_co2_emis@rohe_incubation_giessen_soilchemistry_subdaily)' 
+      evaluation:  'daymean(c_co2_emis_mean@rohe_observations_agg)' 
+
+
+## future stuff
+#sensitivity:
+#  time: '2004-01-01->2008-12-31'
+#
+#  properties: { method: 'fast' }
+#sensitivities:
+#  - soilwater:
+
+
