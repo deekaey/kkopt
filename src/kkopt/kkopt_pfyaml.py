@@ -107,6 +107,8 @@ class kkopt_pfreader_yaml( object) :
                 if self._is_valid( config, i) :
                     if i == 'parameters':
                         setting.add_parameter_file( kkexpand( config[i]))
+                    elif type(config[i]) == str:
+                        setting.add_property( i, kkexpand( config[i]))            
                     else:
                         setting.add_property( i, config[i])            
         else :
