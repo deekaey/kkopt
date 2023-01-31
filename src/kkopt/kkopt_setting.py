@@ -78,7 +78,11 @@ class kkopt_setting( object) :
 
     @property
     def output( self) :
-        return self._output
+        return ''.join((self._properties['output']).split('.')[:-1])
+
+    @property
+    def outputformat( self) :
+        return (self._properties['output']).split('.')[-1]
 
     @property
     def evaluations( self) :

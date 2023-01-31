@@ -5,7 +5,7 @@ from kkplot.kkutils.expand import *
 from kkplot.kkplot_figure import kkplot_datasource
 from kkplot.kkplot_figure import kkplot_expressions
 from kkplot.kkplot_figure import DSSEP
-
+from kkplot.kkplot_pfyaml import load as kkopt_load
 from kkplot.kkplot_pfyaml import merge_plotfiles
 import yaml
 
@@ -16,7 +16,7 @@ class kkopt_pfreader_yaml( object) :
         self._pf_name = _conf.optfile()
         self._pf_data = None
 
-        rc_load = self.load( self._pf_name)
+        rc_load, self._pf_data = kkopt_load( self._pf_name, self._pf_data)
         if rc_load :
             raise RuntimeError( 'loading config file failed')
         kklog_debug( 'loading calibration configuration successful')
@@ -29,46 +29,6 @@ class kkopt_pfreader_yaml( object) :
     @property
     def calibrationfile( self) :
         return  self._pf_name
-
-    def load( self, _fname, _mergewith=None) :
-        rc_load = 0
-        pf_stream = None
-        yamldata = None
-        try :
-            try :
-                if _fname == '-' :
-                    pf_stream = sys.stdin
-                else :
-                    fname = kkexpand( _fname)
-                    pf_stream = open( fname, 'r')
-                yamldata = yaml.load( pf_stream, Loader=yaml.FullLoader)
-                if self._pf_data is None :
-                    self._pf_data = yamldata
-                else :
-                    merge_plotfiles( self._pf_data, yamldata)
-            except IOError :
-                kklog_error( '%s  [file=%s]' % ( ioerr, _fname))
-                rc_load = -1
-            except yaml.YAMLError :
-                yaml_err_line = '?'
-                if hasattr( yaml_err, 'problem_mark') :
-                    yaml_err_line = yaml_err.problem_mark.line+1
-                    yaml_err_col = yaml_err.problem_mark.column+1
-                kklog_error( '%s  [file=%s,line/column=%d/%d]' %
-                        ( yaml_err, _fname, yaml_err_line, yaml_err_col))
-                rc_load = -1
-        finally :
-            if pf_stream :
-                pf_stream.close()
-
-        if yamldata :
-            fincludes = yamldata.get( 'include')
-            
-            if isinstance( fincludes, list) :
-                for finclude in fincludes :
-                    self.load( finclude)
-
-        return  rc_load
 
     def read( self) :
         kklog_debug( 'reading configuration [%s]' % self._pf_name)
@@ -170,7 +130,7 @@ class kkopt_pfreader_yaml( object) :
             add_calibration = dict({'id': calibration_id})
             add_calibration.update({'sampletime': calibration_block['sampletime'] })
             for i in ['evaluation', 'simulation'] :
-                exprs = kkplot_expressions( calibration_id+'.'+i, [calibration_block[i]])
+                exprs = kkplot_expressions( calibration_id+'.'+i, [calibration_block[i]['name']])
                 for terminal in exprs.terminals :
                     datasource = None
                     terminal_with_source = [ s.strip() for s in terminal.split( DSSEP)]
@@ -186,7 +146,8 @@ class kkopt_pfreader_yaml( object) :
                     if datasource is None :
                         return -1
 
-                    add_entity = dict( {'expression': calibration_block[i], 
+                    add_entity = dict( {'expression': calibration_block[i]['name'], 
+                                        'filter': calibration_block[i]['filter'], 
                                         'entity': terminal_with_source[0],
                                         'datasource': datasource} )
                     add_calibration.update({i: add_entity}) 

@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 
 from kkplot.kkutils.expand import *
+from kkplot.kkutils.log import *
 import kkopt.kkutils as utils
 import numpy
 import spotpy
@@ -248,11 +249,16 @@ class spot_setup(object):
         path = self._setting.calibrations[0][_target]['datasource'].path
         data = pd.read_csv( path, header=0, na_values=['-99.99','na','nan'], comment='#', sep="\t")
         data = self.canonicalize_headernames( data)
+
         t_from, t_to = sampletime.split( '->')
-        
         eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
         eval_data = eval_data.set_index('datetime')
         eval_data.index = pd.to_datetime(eval_data.index)
+
+        if 'filter' in self._setting.calibrations[0][_target]:
+            for f in self._setting.calibrations[0][_target]['filter']:
+                for k,v in f.items():
+                    eval_data = eval_data.loc[eval_data[k].isin(v),]
         eval_data = eval_data[[entity]]
 
         expression = self._setting.calibrations[0][_target]['expression']
@@ -264,7 +270,7 @@ class spot_setup(object):
 
     @property
     def dbname( self) :
-        return self._setting.properties['output']
+        return self._setting.output
 
     @property
     def repetitions( self) :
@@ -289,9 +295,8 @@ class spot_setup(object):
         for arg in self._setting.properties['model']['arguments'] :
             argument = argument + os.path.expandvars( arg) + ' ' 
 
-        print('run model ', program+' '+argument)
         t0 = time.time()
-        os.system( program+' '+argument)
+        os.system( program+' '+argument + "> /dev/null 2>&1")
         t1 = time.time()
 
         return round( (t1-t0),2)
@@ -306,7 +311,6 @@ class spot_setup(object):
             
             p_index = 0
             for k,v in self._setting.parameters.items() :
-                print(v['name'])
                 search = re.search(r'.*\.%s\..*' % v['name'], subject)
                 pattern = re.compile(r'.*\.%s\..*' % v['name'])
                 subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)            
@@ -315,17 +319,13 @@ class spot_setup(object):
             # write the file
             with open('/Users/kraus-d/.ldndc/Lresources', 'w') as f:
                 f.write(subject)
-
-        print( 'Run model...')
-       
+ 
         time = self.run_simulation()
-        
-        print( 'Duration: ' + str(time) + ' s')
+        kklog_debug('Simulation duration %s s' %str(time))
 
         results = self.get_data( 'simulation', self._evaluation.index)
         if None in results :
-            sys.stderr.write( '[EE] loading of simulation data failed\n')
-            #print str(sys.exc_info()[1])
+            kklog_fatal("loading of simulation data failed")
             results = [ [numpy.nan]*len(series) for series in self.O ]
 
         return results.squeeze().values
@@ -336,44 +336,28 @@ class spot_setup(object):
     #write spoty output more userfriendly
     def finalize( self) :
 
-        infile = open( self.dbname+".csv", 'r')
+        if self._setting.outputformat == 'csv':
+            infile = open( self._setting.output+".csv", 'r')
+            header_line = infile.readline()
+            infile.close()
 
-        #get header line 
-        header_line = infile.readline()
-        infile.close()
-        
-        #get parameter list
-        header_line = header_line.split(',')
-        par_list = [par for par in header_line if 'par' in par]
-    
-        #get data
-        data = np.genfromtxt( self.dbname+".csv", skip_header=1, delimiter=',')
-        data = np.transpose(data)
+            #get parameter list
+            header_line = header_line.split(',')
+            par_list = [par for par in header_line if 'par' in par]
 
-        print(data) 
-        #create meaningfull header (a, b, ...)
-        header_likelihood = data[0]
-        header_rang = [i[0] for i in sorted(enumerate(header_likelihood), key=lambda x:x[1], reverse=True)]
-        header_out = [-99.99 for i in range(len(header_likelihood))]
-        alphabet = list(string.ascii_lowercase)
-        alphabet_counter = 0
-        alphabet_prefix = 1
-        for i, val in enumerate( header_rang) :
-            if alphabet_counter == len(alphabet):
-                alphabet_counter = 0
-                alphabet_prefix += 1
-
-            header_out[val] = str(alphabet_prefix)+alphabet[alphabet_counter]
-            alphabet_counter += 1
-    
-        #remove lines that do not contain data and add header
-        data = data[len(par_list)+1:-1]
-        data = pd.DataFrame(data, columns=header_out)
-
-        #add time from evaluation data and write file
-        eval_data = self.get_data( 'evaluation')
-        data['datetime'] = eval_data.index.strftime('%Y-%m-%d 00:%M:%S')
-        data.to_csv("/Users/kraus-d/projects/kkopt/calibration-output.txt", sep="\t", index=False)
+            #get data
+            data = np.genfromtxt( self._setting.output+".csv", skip_header=1, delimiter=',')
+            data = np.transpose(data)
+            header_likelihood = data[0]
+            header_rang = [self.objective_function+"_"+str(i[0]+1) for i in sorted(enumerate(header_likelihood), key=lambda x:x[1], reverse=True)]
+            header_out = [-99.99 for i in range(len(header_likelihood))]
+            #remove lines that do not contain data and add header
+            data = data[len(par_list)+1:-1]
+            data = pd.DataFrame(data, columns=header_rang)
+            #add time from evaluation data and write file
+            eval_data = self.get_data( 'evaluation')
+            data['datetime'] = eval_data.index.strftime('%Y-%m-%d 00:%M:%S')
+            data.to_csv(self._setting.output+".kkplot", sep="\t", index=False)
 
 def main():
 
@@ -393,8 +377,8 @@ def main():
     ### Spotpy setup
     setup = spot_setup( config, project)
     sampler = spotpy.algorithms.lhs( setup,
-                                     dbname=project.setting.properties['output'], 
-                                     dbformat='csv', 
+                                     dbname=project.setting.output, 
+                                     dbformat=project.setting.outputformat, 
                                      parallel='seq')
 
     sampler.sample( setup.repetitions)
