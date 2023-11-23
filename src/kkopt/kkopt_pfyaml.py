@@ -7,6 +7,7 @@ from kkplot.kkplot_figure import kkplot_expressions
 from kkplot.kkplot_figure import DSSEP
 from kkplot.kkplot_pfyaml import load as kkopt_load
 from kkplot.kkplot_pfyaml import merge_plotfiles
+import kkplot.kkplot_provider as kkplot_provider
 import yaml
 
 class kkopt_pfreader_yaml( object) :
@@ -147,9 +148,11 @@ class kkopt_pfreader_yaml( object) :
                         return -1
 
                     add_entity = dict( {'expression': calibration_block[i]['name'], 
-                                        'filter': calibration_block[i]['filter'], 
                                         'entity': terminal_with_source[0],
                                         'datasource': datasource} )
+                    if 'filter' in calibration_block[i]:
+                        add_entity.update( {filter: calibration_block[i]['filter']} )
+
                     add_calibration.update({i: add_entity}) 
 
             self._setting.calibrations.append( add_calibration)

@@ -9,7 +9,7 @@ import time
 import re
 import pandas as pd
 import numpy as np
-
+import math
 from kkplot.kkutils.expand import *
 from kkplot.kkutils.log import *
 import kkopt.kkutils as utils
@@ -20,6 +20,7 @@ import numexpr as numexpr
 from kkplot.kksources import kkplot_sourcefactory as kkplot_sourcefactory
 from kkplot.kkplot_dviplot import *
 from kkplot.kkplot_figure import DSSEP
+import matplotlib.pyplot as plt
 
 class lspotpy_object_factories( object) :
     def  __init__( self, _kinds) :
@@ -130,7 +131,7 @@ class spot_setup(object):
         ##get all settings 
         self._setting = _project.setting
 
-        self._calibrations = _project.calibrations
+        #self._calibrations = _project.calibrations
 
         #objectivefunction
         self.objective_function = self._setting.get_property( 'likelihood')
@@ -141,8 +142,9 @@ class spot_setup(object):
         self.run_simulation()
 
         #prepare evaluation data
-        simulation_data = self.get_data( 'simulation')
-        self._evaluation = self.get_data( 'evaluation', simulation_data.index)
+        temp = self.get_data( 'simulation')
+        self._evaluation = self.get_data( 'evaluation', temp)
+        self._simulation = self.get_data( 'simulation', self._evaluation)
 
         #prepare parameters
         self.params = []
@@ -243,30 +245,42 @@ class spot_setup(object):
 
     def get_data( self, _target, _index=None) :
 
-        datasource_name = self._setting.calibrations[0][_target]['datasource'].name
-        sampletime = self._setting.calibrations[0]['sampletime']
-        entity = self._setting.calibrations[0][_target]['entity']
-        path = self._setting.calibrations[0][_target]['datasource'].path
-        data = pd.read_csv( path, header=0, na_values=['-99.99','na','nan'], comment='#', sep="\t")
-        data = self.canonicalize_headernames( data)
+        data_out = pd.DataFrame()
+        for i in range(len(self._setting.calibrations)):
+            datasource_name = self._setting.calibrations[i][_target]['datasource'].name
+            sampletime = self._setting.calibrations[i]['sampletime']
+            entity = self._setting.calibrations[i][_target]['entity']
+            path = self._setting.calibrations[i][_target]['datasource'].path
+            data = pd.read_csv( path, header=0, na_values=['-99.99','na','nan'], comment='#', sep="\t")
+            data = self.canonicalize_headernames( data)
 
-        t_from, t_to = sampletime.split( '->')
-        eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
-        eval_data = eval_data.set_index('datetime')
-        eval_data.index = pd.to_datetime(eval_data.index)
+            t_from, t_to = sampletime.split( '->')
+            eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
+            eval_data = eval_data.set_index('datetime')
+            eval_data.index = pd.to_datetime(eval_data.index)
 
-        if 'filter' in self._setting.calibrations[0][_target]:
-            for f in self._setting.calibrations[0][_target]['filter']:
-                for k,v in f.items():
-                    eval_data = eval_data.loc[eval_data[k].isin(v),]
-        eval_data = eval_data[[entity]]
+            if 'filter' in self._setting.calibrations[i][_target]:
+                for f in self._setting.calibrations[i][_target]['filter']:
+                    for k,v in f.items():
+                        eval_data = eval_data.loc[eval_data[k].isin(v),]
+            eval_data = eval_data[[entity]]
 
-        expression = self._setting.calibrations[0][_target]['expression']
-        expression = expression.replace( entity+DSSEP+datasource_name, 'eval_data["%s"]' %entity)
-        eval_data = eval(expression).to_frame()
+            expression = self._setting.calibrations[i][_target]['expression']
+            expression = expression.replace( entity+DSSEP+datasource_name, 'eval_data["%s"]' %entity)
+            eval_data = eval(expression).to_frame()
+            eval_data.rename(columns={entity: self._setting.calibrations[i]['id']}, inplace=True)
+            data_out = pd.concat([data_out, eval_data])
         if _index is not None:
-            eval_data = eval_data.loc[eval_data.index.isin(_index),:]
-        return eval_data
+            collect_data = pd.DataFrame()
+            for c in data_out.columns:
+                column_data_out = data_out.loc[:,c].to_frame().dropna()
+                column_data_index = _index.loc[:,c].to_frame().dropna()
+                column_data = column_data_out.loc[column_data_out.index.isin(column_data_index.index),:]
+                collect_data = pd.concat([collect_data, column_data])
+            collect_data['all'] = collect_data.sum(axis=1)
+            return collect_data
+        data_out['all'] = data_out.sum(axis=1)
+        return data_out
 
     @property
     def dbname( self) :
@@ -281,12 +295,17 @@ class spot_setup(object):
     # This can be done in the def simulation (than only those simulations are saved), 
     # or in the def objectivefunctions (than all simulations are saved)
     def objectivefunction( self, simulation, evaluation) :
-        L = -99.99
-        if self.objective_function == 'r2' :
-            L = spotpy.objectivefunctions.rsquared( evaluation, simulation)
-        elif self.objective_function == 'rmse' :
-            L = -spotpy.objectivefunctions.rmse( evaluation, simulation)
-        return L
+        L = np.array([])
+        for s, e in zip(self._evaluation.columns, self._evaluation.columns): 
+            if s == e == 'all':
+                continue
+            if self.objective_function == 'r2' :
+                L = np.append(L, spotpy.objectivefunctions.rsquared( self._evaluation[e].dropna().squeeze().values, 
+                                                        self._simulation[s].dropna().squeeze().values))
+            elif self.objective_function == 'rmse' :
+                L = np.append(L, -spotpy.objectivefunctions.rmse( self._evaluation[e].dropna().squeeze().values, 
+                                                     self._simulation[s].dropna().squeeze().values))
+        return L.mean()
 
     def run_simulation( self) :
 
@@ -323,18 +342,26 @@ class spot_setup(object):
         time = self.run_simulation()
         kklog_debug('Simulation duration %s s' %str(time))
 
-        results = self.get_data( 'simulation', self._evaluation.index)
-        if None in results :
+        self._simulation = self.get_data( 'simulation', self._evaluation)
+        if None in self._simulation :
             kklog_fatal("loading of simulation data failed")
-            results = [ [numpy.nan]*len(series) for series in self.O ]
+            self._simulation = [ [numpy.nan]*len(series) for series in self.O ]
 
-        return results.squeeze().values
+        return self._simulation['all'].squeeze().values
 
     def evaluation( self):
-        return self._evaluation.squeeze().values
+        return self._evaluation['all'].squeeze().values
 
     #write spoty output more userfriendly
-    def finalize( self) :
+    def finalize( self, _sampler) :
+
+        results = _sampler.getdata()
+
+        try:
+            spotpy.analyser.plot_fast_sensitivity(results, number_of_sensitiv_pars=3)
+        except:
+            pass
+
 
         if self._setting.outputformat == 'csv':
             infile = open( self._setting.output+".csv", 'r')
@@ -349,15 +376,53 @@ class spot_setup(object):
             data = np.genfromtxt( self._setting.output+".csv", skip_header=1, delimiter=',')
             data = np.transpose(data)
             header_likelihood = data[0]
-            header_rang = [self.objective_function+"_"+str(i[0]+1) for i in sorted(enumerate(header_likelihood), key=lambda x:x[1], reverse=True)]
+            header_rang = ['TEMP_' + str(i[0]+1) for i in sorted(enumerate(header_likelihood), key=lambda x:x[1], reverse=True)]
             header_out = [-99.99 for i in range(len(header_likelihood))]
-            #remove lines that do not contain data and add header
+
+
+            df_par = data[:len(par_list)+1]
+            df_par = pd.DataFrame({'likelihood': df_par[0]})
+            for n,c in zip(par_list,data[1:len(par_list)+1]):
+                df_par[n] = c
+
+
             data = data[len(par_list)+1:-1]
             data = pd.DataFrame(data, columns=header_rang)
+            data['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
+
             #add time from evaluation data and write file
-            eval_data = self.get_data( 'evaluation')
-            data['datetime'] = eval_data.index.strftime('%Y-%m-%d 00:%M:%S')
-            data.to_csv(self._setting.output+".kkplot", sep="\t", index=False)
+            self._evaluation['index'] = np.arange( len(self._evaluation))
+            for c in self._setting.calibrations:
+                ev_index = self._evaluation['index'].loc[self._evaluation[c['id']].notna()]
+                header = [h.replace('TEMP', c['id']) for h in data.columns]
+                data.iloc[ev_index].to_csv(f"{self._setting.output}_{c['id']}.kkplot", sep="\t", index=False, header=header)
+
+
+
+            fig, ax = plt.subplots(nrows=math.ceil(5/3), ncols=3, figsize=(10, 4))
+            nd_bins = 10
+            df = df_par.nlargest(50, ['likelihood'])
+            for par, x in zip(par_list, ax.flat):
+
+                df.hist(column=par, bins=nd_bins, grid=False, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
+                
+                # Despine
+                x.spines['right'].set_visible(False)
+                x.spines['top'].set_visible(False)
+                x.spines['left'].set_visible(False)
+
+                # Switch off ticks
+                x.tick_params(axis="both", which="both", bottom="off", top="off", labelbottom="on", left="off", right="off", labelleft="off")
+
+                x.set_title("")
+
+                # Set x-axis label
+                x.set_xlabel(par[3:], labelpad=20, weight='bold', size=12)
+
+                #x.set_xlim(0,1)
+                x.set_yticklabels([])
+            fig.savefig("histogram.png")
+            
 
 def main():
 
@@ -376,14 +441,17 @@ def main():
 
     ### Spotpy setup
     setup = spot_setup( config, project)
-    sampler = spotpy.algorithms.lhs( setup,
-                                     dbname=project.setting.output, 
-                                     dbformat=project.setting.outputformat, 
-                                     parallel='seq')
+
+    lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs, 'fast': spotpy.algorithms.fast})
+    name = 'fast'
+    sampler = lspotpy_functions[name]( setup,
+                                       dbname=project.setting.output, 
+                                       dbformat=project.setting.outputformat, 
+                                       parallel='seq')
 
     sampler.sample( setup.repetitions)
 
-    setup.finalize()
+    setup.finalize( sampler)
 
 if __name__ == '__main__' :
 
