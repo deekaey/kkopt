@@ -325,7 +325,7 @@ class spot_setup(object):
         if _parameters is not None:
             # open the source file and read it
             subject = ''
-            with open('/Users/kraus-d/.ldndc/Lresources', 'r') as f:
+            with open('${HOME}/.ldndc/Lresources', 'r') as f:
                 subject = f.read()
             
             p_index = 0
@@ -336,7 +336,7 @@ class spot_setup(object):
                 p_index += 1
 
             # write the file
-            with open('/Users/kraus-d/.ldndc/Lresources', 'w') as f:
+            with open('${HOME}/.ldndc/Lresources', 'w') as f:
                 f.write(subject)
  
         time = self.run_simulation()
