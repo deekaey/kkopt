@@ -83,20 +83,6 @@ class kkopt_pfreader_yaml( object) :
 
         return setting
 
-        #figure = kkplot_figure( _title=fig_title, _extent=( fig_rows, fig_columns), \
-        #    _size=( fig_height, fig_width), _outputfile=fig_output, _outputfileformat=fig_output_format, _components=fig_components)
-
-        if self._is_valid( config, 'datasource') :
-            datasource = \
-                self.read_source( fig['datasource'], kkplot_datasource())
-
-        if self._is_valid( fig, 'style') :
-            figure.add_properties( fig['style'])
-        if self._is_valid( fig, 'properties') :
-            figure.add_properties( fig['properties'])
-
-        return figure, packed
-
     def read_namedconstants( self) :
         if self._is_valid( self._pf_data, 'define') :
             self._setting.add_defines( self._pf_data['define'])

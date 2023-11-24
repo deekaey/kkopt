@@ -247,6 +247,8 @@ class spot_setup(object):
 
         data_out = pd.DataFrame()
         for i in range(len(self._setting.calibrations)):
+            if self._setting.calibrations[i][_target]['datasource'].has_provider:
+                self._setting.calibrations[i][_target]['datasource'].provider.execute()
             datasource_name = self._setting.calibrations[i][_target]['datasource'].name
             sampletime = self._setting.calibrations[i]['sampletime']
             entity = self._setting.calibrations[i][_target]['entity']
@@ -325,7 +327,7 @@ class spot_setup(object):
         if _parameters is not None:
             # open the source file and read it
             subject = ''
-            with open('${HOME}/.ldndc/Lresources', 'r') as f:
+            with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
                 subject = f.read()
             
             p_index = 0
@@ -336,7 +338,7 @@ class spot_setup(object):
                 p_index += 1
 
             # write the file
-            with open('${HOME}/.ldndc/Lresources', 'w') as f:
+            with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'w') as f:
                 f.write(subject)
  
         time = self.run_simulation()
