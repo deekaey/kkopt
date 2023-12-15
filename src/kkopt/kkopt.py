@@ -289,9 +289,12 @@ class spot_setup(object):
         return self._setting.output
 
     @property
+    def method( self) :
+        return self._setting.method
+
+    @property
     def repetitions( self) :
         return self._setting.repetitions
-
     # This function is needed for spotpy to compare simulation and validation data
     # Keep in mind, that you reduce your simulation data to the values that can be compared with observation data
     # This can be done in the def simulation (than only those simulations are saved), 
@@ -387,7 +390,6 @@ class spot_setup(object):
             for n,c in zip(par_list,data[1:len(par_list)+1]):
                 df_par[n] = c
 
-
             data = data[len(par_list)+1:-1]
             data = pd.DataFrame(data, columns=header_rang)
             data['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
@@ -398,8 +400,6 @@ class spot_setup(object):
                 ev_index = self._evaluation['index'].loc[self._evaluation[c['id']].notna()]
                 header = [h.replace('TEMP', c['id']) for h in data.columns]
                 data.iloc[ev_index].to_csv(f"{self._setting.output}_{c['id']}.kkplot", sep="\t", index=False, header=header)
-
-
 
             fig, ax = plt.subplots(nrows=math.ceil(5/3), ncols=3, figsize=(10, 4))
             nd_bins = 10
@@ -444,13 +444,12 @@ def main():
     ### Spotpy setup
     setup = spot_setup( config, project)
 
-    lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs, 'fast': spotpy.algorithms.fast})
-    name = 'fast'
-    sampler = lspotpy_functions[name]( setup,
-                                       dbname=project.setting.output, 
-                                       dbformat=project.setting.outputformat, 
-                                       parallel='seq')
-
+    lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs, 'fast': spotpy.algorithms.fast,
+                                'mcmc': spotpy.algorithms.mcmc})
+    sampler = lspotpy_functions[setup.method]( setup,
+                                               dbname=project.setting.output, 
+                                               dbformat=project.setting.outputformat, 
+                                               parallel='seq')
     sampler.sample( setup.repetitions)
 
     setup.finalize( sampler)

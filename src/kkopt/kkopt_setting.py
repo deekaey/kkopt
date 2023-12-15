@@ -71,6 +71,10 @@ class kkopt_setting( object) :
     @property
     def repetitions( self) :
         return self._properties['repititions']
+    
+    @property
+    def method( self) :
+        return self._properties['method']
 
     @property
     def simulationtime( self) :
