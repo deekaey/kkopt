@@ -21,7 +21,8 @@ from kkplot.kksources import kkplot_sourcefactory as kkplot_sourcefactory
 from kkplot.kkplot_dviplot import *
 from kkplot.kkplot_figure import DSSEP
 import matplotlib.pyplot as plt
-
+import subprocess
+        
 class lspotpy_object_factories( object) :
     def  __init__( self, _kinds) :
         self._kinds = _kinds
@@ -306,21 +307,39 @@ class spot_setup(object):
                 continue
             if self.objective_function == 'r2' :
                 L = np.append(L, spotpy.objectivefunctions.rsquared( self._evaluation[e].dropna().squeeze().values, 
-                                                        self._simulation[s].dropna().squeeze().values))
+                                                                     self._simulation[s].dropna().squeeze().values))
             elif self.objective_function == 'rmse' :
                 L = np.append(L, -spotpy.objectivefunctions.rmse( self._evaluation[e].dropna().squeeze().values, 
-                                                     self._simulation[s].dropna().squeeze().values))
+                                                                  self._simulation[s].dropna().squeeze().values))
         return L.mean()
 
     def run_simulation( self) :
 
-        program = os.path.expandvars( self._setting.properties['model']['binary'])
-        argument = ''
-        for arg in self._setting.properties['model']['arguments'] :
-            argument = argument + os.path.expandvars( arg) + ' ' 
+        models = []
+        for submodel in self._setting.properties['model']['submodels']:
+            program = os.path.expandvars( submodel['binary'])
+            argument = ''
+            for arg in submodel['arguments'] :
+                argument = argument + os.path.expandvars( arg) + ' '
+            models.append( program+" "+argument + "> /dev/null 2>&1")
 
         t0 = time.time()
-        os.system( program+' '+argument + "> /dev/null 2>&1")
+
+        if self._setting.properties['model']['mode'] == 'parallel':
+
+            # List to store subprocess objects
+            processes = []
+
+            # Start each command as a subprocess
+            for m in models:
+                # Use shell=True to run the command through the shell
+                process = subprocess.Popen( m, shell=True)
+                processes.append(process)
+
+            # Wait for all processes to complete
+            for process in processes:
+                process.wait()
+
         t1 = time.time()
 
         return round( (t1-t0),2)
@@ -336,13 +355,21 @@ class spot_setup(object):
             p_index = 0
             for k,v in self._setting.parameters.items() :
                 search = re.search(r'.*\.%s\..*' % v['name'], subject)
-                pattern = re.compile(r'.*\.%s\..*' % v['name'])
-                subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)            
+                #todo: add log warning
+                if search != None:
+                    pattern = re.compile(r'.*\.%s\..*' % v['name'])
+                    subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
                 p_index += 1
 
             # write the file
-            with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'w') as f:
-                f.write(subject)
+            import shutil
+            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp')
+            if not os.path.exists( Lresources_path):
+                os.makedirs( Lresources_path)
+            if not os.path.exists( Lresources_path+"/udunits2"):
+                shutil.copytree( kkexpand('${HOME}')+'/.ldndc/udunits2', Lresources_path+'/udunits2')
+            with open(os.path.join( Lresources_path, 'Lresources'), 'w') as f:
+                f.write( subject)
  
         time = self.run_simulation()
         kklog_debug('Simulation duration %s s' %str(time))
