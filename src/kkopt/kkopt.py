@@ -301,16 +301,17 @@ class spot_setup(object):
     # This can be done in the def simulation (than only those simulations are saved), 
     # or in the def objectivefunctions (than all simulations are saved)
     def objectivefunction( self, simulation, evaluation) :
+
         L = np.array([])
-        for s, e in zip(self._evaluation.columns, self._evaluation.columns): 
-            if s == e == 'all':
+        for c in self._evaluation.columns:
+            if c == 'all':
                 continue
             if self.objective_function == 'r2' :
-                L = np.append(L, spotpy.objectivefunctions.rsquared( self._evaluation[e].dropna().squeeze().values, 
-                                                                     self._simulation[s].dropna().squeeze().values))
+                L = np.append(L, spotpy.objectivefunctions.rsquared( self._evaluation[c].dropna().squeeze().values,
+                                                                     self._simulation[c].dropna().squeeze().values))
             elif self.objective_function == 'rmse' :
-                L = np.append(L, -spotpy.objectivefunctions.rmse( self._evaluation[e].dropna().squeeze().values, 
-                                                                  self._simulation[s].dropna().squeeze().values))
+                L = np.append(L, -spotpy.objectivefunctions.rmse( self._evaluation[c].dropna().squeeze().values,
+                                                                  self._simulation[c].dropna().squeeze().values))
         return L.mean()
 
     def run_simulation( self) :
@@ -433,7 +434,7 @@ class spot_setup(object):
             df = df_par.nlargest(50, ['likelihood'])
             for par, x in zip(par_list, ax.flat):
 
-                df.hist(column=par, bins=nd_bins, grid=False, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
+                df.hist(column=par, bins=nd_bins, grid=True, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
                 
                 # Despine
                 x.spines['right'].set_visible(False)
@@ -446,7 +447,7 @@ class spot_setup(object):
                 x.set_title("")
 
                 # Set x-axis label
-                x.set_xlabel(par[3:], labelpad=20, weight='bold', size=12)
+                x.set_xlabel(par[3:]) #, labelpad=20, weight='bold', size=12)
 
                 #x.set_xlim(0,1)
                 x.set_yticklabels([])
