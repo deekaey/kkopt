@@ -125,6 +125,7 @@ class lspotpy_parameter( object) :
     def  sample( self) :
         return  self.distribution.sample( self.n_samples)
 
+
 class spot_setup(object):
     def __init__(self, _config, _project):
 
@@ -133,6 +134,7 @@ class spot_setup(object):
         self._setting = _project.setting
 
         #self._calibrations = _project.calibrations
+        self.likes = []
 
         #objectivefunction
         self.objective_function = self._setting.get_property( 'likelihood')
@@ -140,12 +142,15 @@ class spot_setup(object):
         #run test simulation to get test output needed for 
         #preparation of evaluation data (maybe not needed or implement on demand)
         #utils.kklog.log_info('Start test simulation')
+        self.update_parameters( None)
         self.run_simulation()
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
         self._evaluation = self.get_data( 'evaluation', temp)
         self._simulation = self.get_data( 'simulation', self._evaluation)
+        self._simulation_default = self._simulation
+        self.objectivefunction( self._simulation, self._evaluation)
 
         #prepare parameters
         self.params = []
@@ -312,6 +317,8 @@ class spot_setup(object):
             elif self.objective_function == 'rmse' :
                 L = np.append(L, -spotpy.objectivefunctions.rmse( self._evaluation[c].dropna().squeeze().values,
                                                                   self._simulation[c].dropna().squeeze().values))
+
+        self.likes.append( np.append( L, L.mean()))
         return L.mean()
 
     def run_simulation( self) :
@@ -338,21 +345,22 @@ class spot_setup(object):
                 processes.append(process)
 
             # Wait for all processes to complete
+            rcs = np.array([])
             for process in processes:
-                process.wait()
+                rcs = np.append( rcs, process.wait())
 
         t1 = time.time()
 
-        return round( (t1-t0),2)
+        return (rcs.sum(), round( (t1-t0),2))
 
-    def simulation( self, _parameters=None) :
 
+    def update_parameters( self, _parameters=None):
+        # open the source file and read it
+        subject = ''
+        with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
+            subject = f.read()
+        
         if _parameters is not None:
-            # open the source file and read it
-            subject = ''
-            with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
-                subject = f.read()
-            
             p_index = 0
             for k,v in self._setting.parameters.items() :
                 search = re.search(r'.*\.%s\..*' % v['name'], subject)
@@ -362,23 +370,31 @@ class spot_setup(object):
                     subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
                 p_index += 1
 
-            # write the file
-            import shutil
-            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp')
-            if not os.path.exists( Lresources_path):
-                os.makedirs( Lresources_path)
-            if not os.path.exists( Lresources_path+"/udunits2"):
-                shutil.copytree( kkexpand('${HOME}')+'/.ldndc/udunits2', Lresources_path+'/udunits2')
-            with open(os.path.join( Lresources_path, 'Lresources'), 'w') as f:
-                f.write( subject)
+        # write the file
+        import shutil
+        Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp')
+        if not os.path.exists( Lresources_path):
+            os.makedirs( Lresources_path)
+        if not os.path.exists( Lresources_path+"/udunits2"):
+            shutil.copytree( kkexpand('${HOME}')+'/.ldndc/udunits2', Lresources_path+'/udunits2')
+        with open(os.path.join( Lresources_path, 'Lresources'), 'w') as f:
+            f.write( subject)
+
+    def simulation( self, _parameters=None) :
+
+        if _parameters is not None:
+            self.update_parameters( _parameters)
  
-        time = self.run_simulation()
+        (rc,time) = self.run_simulation()
         kklog_debug('Simulation duration %s s' %str(time))
 
         self._simulation = self.get_data( 'simulation', self._evaluation)
         if None in self._simulation :
-            kklog_fatal("loading of simulation data failed")
-            self._simulation = [ [numpy.nan]*len(series) for series in self.O ]
+            kklog_warn("loading of simulation data failed")
+            self._simulation = pd.DataFrame( np.nan, index=range(self._simulation.shape[0]), columns=self._simulation.columns)
+        elif rc > 0:
+            kklog_warn("model call not successful")
+            self._simulation = pd.DataFrame( np.nan, index=range(self._simulation.shape[0]), columns=self._simulation.columns)
 
         return self._simulation['all'].squeeze().values
 
@@ -391,47 +407,51 @@ class spot_setup(object):
         results = _sampler.getdata()
 
         try:
-            spotpy.analyser.plot_fast_sensitivity(results, number_of_sensitiv_pars=3)
+            spotpy.analyser.plot_fast_sensitivity( results, number_of_sensitiv_pars=3)
         except:
             pass
 
+        self.postprocess( np.asarray([np.asarray(item) for item in results.astype(object)]))
 
+    def postprocess( self, _results):
         if self._setting.outputformat == 'csv':
-            infile = open( self._setting.output+".csv", 'r')
-            header_line = infile.readline()
-            infile.close()
 
-            #get parameter list
-            header_line = header_line.split(',')
-            par_list = [par for par in header_line if 'par' in par]
-
+            par_list = [p.name for p in self.params]
+            
             #get data
-            data = np.genfromtxt( self._setting.output+".csv", skip_header=1, delimiter=',')
-            data = np.transpose(data)
-            header_likelihood = data[0]
-            header_rang = ['TEMP_' + str(i[0]+1) for i in sorted(enumerate(header_likelihood), key=lambda x:x[1], reverse=True)]
-            header_out = [-99.99 for i in range(len(header_likelihood))]
+            results = np.transpose( _results)
 
+            sorted_indices = np.argsort(results[0])[::-1]
+            results = results[:, sorted_indices]
 
-            df_par = data[:len(par_list)+1]
+            df_par = results[:len(par_list)+1]
             df_par = pd.DataFrame({'likelihood': df_par[0]})
-            for n,c in zip(par_list,data[1:len(par_list)+1]):
+            for n,c in zip(par_list, results[1:len(par_list)+1]):
                 df_par[n] = c
 
-            data = data[len(par_list)+1:-1]
-            data = pd.DataFrame(data, columns=header_rang)
-            data['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
+            df_par.to_csv( self._setting.output+"_like.csv", index=False)
+            
+            results = results[len(par_list)+1:-1]
+            results = pd.DataFrame(results, columns=["TEMP_"+str(i+1) for i in range(len(results[0]))])
+            results['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
 
             #add time from evaluation data and write file
             self._evaluation['index'] = np.arange( len(self._evaluation))
             for c in self._setting.calibrations:
                 ev_index = self._evaluation['index'].loc[self._evaluation[c['id']].notna()]
-                header = [h.replace('TEMP', c['id']) for h in data.columns]
-                data.iloc[ev_index].to_csv(f"{self._setting.output}_{c['id']}.kkplot", sep="\t", index=False, header=header)
+                header = [h.replace('TEMP', c['id']) for h in results.columns]
+                
+                data_out = results.iloc[ev_index]
+                data_out.columns = header
+                data_out["default"] = self._simulation_default[c['id']].dropna().values
+                data_out.to_csv(f"{self._setting.output}_{c['id']}.kkplot", sep="\t", index=False)
 
             fig, ax = plt.subplots(nrows=math.ceil(5/3), ncols=3, figsize=(10, 4))
             nd_bins = 10
-            df = df_par.nlargest(50, ['likelihood'])
+
+            # Filter the DataFrame to get the top 5% largest values
+            df = df_par[df_par['likelihood'] >= df_par['likelihood'].quantile(0.9)]
+            #df = df_par.nlargest(50, ['likelihood'])
             for par, x in zip(par_list, ax.flat):
 
                 df.hist(column=par, bins=nd_bins, grid=True, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
