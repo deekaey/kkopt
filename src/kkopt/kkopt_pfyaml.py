@@ -54,10 +54,9 @@ class kkopt_pfreader_yaml( object) :
         if config :
             calibration_title = config.get( 'title', '')
             calibration_title = kkexpand( calibration_title)
-            kklog_debug( 'calibration title is "%s"' % ( calibration_title))
+
             calibration_output = config.get( 'output', None)
             calibration_output = kkexpand( calibration_output)
-            kklog_debug( 'calibration output will be written to "%s"' % ( calibration_output))
 
             for i in ['simulationtime', 'sampletime', 
                       'repititions', 'model',
@@ -69,15 +68,14 @@ class kkopt_pfreader_yaml( object) :
                     if i == 'parameters':
                         setting.add_parameter_file( kkexpand( config[i]))
                     elif type(config[i]) == str:
-                        setting.add_property( i, kkexpand( config[i]))            
+                        setting.add_property( i, kkexpand( config[i]))
                     else:
-                        setting.add_property( i, config[i])            
+                        setting.add_property( i, config[i])
         else :
             return None
 
         if self._is_valid( config, 'datasource') :
-            setting.datasource = \
-                self.read_source( config['datasource'], kkplot_datasource())
+            setting.datasource = self.read_source( config['datasource'], kkplot_datasource())
         #sources = self._pf_data.get( 'datasources')
         #self._setting.add_sources( sources)
 
@@ -94,7 +92,7 @@ class kkopt_pfreader_yaml( object) :
             plot_source = self.read_source( \
                 _node['datasource'], _defaults['datasource'])
         return { 'datasource':plot_source }
-    
+
     def read_calibrations( self) :
         if len( self._pf_data.get( 'calibrations', [] )) == 0 :
             return 0
@@ -115,7 +113,8 @@ class kkopt_pfreader_yaml( object) :
             calibration_datasource = calibration_infos['datasource']
 
             add_calibration = dict({'id': calibration_id})
-            add_calibration.update({'sampletime': calibration_block['sampletime'] })
+            if 'sampletime' in calibration_block:
+                add_calibration.update({'sampletime': calibration_block['sampletime'] })
             for i in ['evaluation', 'simulation'] :
                 exprs = kkplot_expressions( calibration_id+'.'+i, [calibration_block[i]['name']])
                 for terminal in exprs.terminals :
@@ -143,7 +142,6 @@ class kkopt_pfreader_yaml( object) :
 
             self._setting.calibrations.append( add_calibration)
         return  0
-
 
     def read_evaluations( self, _calibration_block) :
         if 'evaluation' in _calibration_block :
