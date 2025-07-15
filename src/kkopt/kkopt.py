@@ -22,7 +22,13 @@ from kkplot.kkplot_dviplot import *
 from kkplot.kkplot_figure import DSSEP
 import matplotlib.pyplot as plt
 import subprocess
-        
+
+try:
+    from mpi4py import MPI
+except ImportError:
+    raise Exception("MPI python module mpi4py not available. Exit!")
+
+
 class lspotpy_object_factories( object) :
     def  __init__( self, _kinds) :
         self._kinds = _kinds
@@ -138,7 +144,7 @@ class spot_setup(object):
 
         #objectivefunction
         self.objective_function = self._setting.get_property( 'likelihood')
-        
+
         #run test simulation to get test output needed for 
         #preparation of evaluation data (maybe not needed or implement on demand)
         #utils.kklog.log_info('Start test simulation')
@@ -172,83 +178,6 @@ class spot_setup(object):
         _querydata.columns = [ c[:unit_offs( len(c), c.find( '['))] for c in data_columns ]
         return _querydata
 
-    def _scan_expression( self, _expression) :
-        digits = '0123456789'
-        identifierchars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_' + digits + NSSEP + DSSEP
-        identifiernonheadchars = digits + DSSEP
-        operatorchars = '+-*/%'
-        identifiers = list()
-        functions = list()
-        namedconstants = list()
-        numbers = list()
-        tokens = list()
-
-        token = ''
-        number = ''
-        expression = '%s%s' % ( _expression, '$') ## add stop marker
-        for ( p, c) in enumerate( expression) :
-            if token == '' and ( c in digits or ( number != '' and ( c == '.' or c == 'e' or c == 'E'))) :
-                number += c
-            elif c in identifierchars :
-                if token == '' :
-                    identpos = p
-                token += c
-            elif c == '(' and token != '' :
-                functions.append( token) #kkterm( p, token))
-                tokens.append( token)
-                token = ''
-            else :
-                if token != '' and token != NSSEP :
-                    if token[0] in identifiernonheadchars :
-                        kklog_fatal( 'invalid identifier')
-                        raise RuntimeError( 'invalid identifier')
-                    if False :#self._isnamedconst( token) :
-                        namedconstants.append( token) #kkterm( p, token))
-                        tokens.append( token)
-                    else :
-                        identifiers.append( token)
-                        tokens.append( token)
-                    token = ''
-                elif number != '' :
-                    numbers.append( number)
-                    tokens.append( number)
-                    number = ''
-                if c in operatorchars and token != '$' :
-                    tokens.append( c)
-            if c in '(),' :
-                tokens.append( c)
-
-        return  dict( I=identifiers, F=functions, D=namedconstants, T=tokens)
-
-    def _resolve_defines( self, _expression) :
-        expr = self._scan_expression( _expression)
-        tokens = expr["T"]
-        namedconstants = expr["D"]
-        functions = expr["F"]
-
-        expression = ""
-        for token in tokens :
-            tokenreplace = token
-            #if token in namedconstants :
-            #    if not self._isnamedconst( token) :
-            #        kklog_fatal( 'named constant not defined  [token=%s]' % ( token))
-            #    tokenreplace = '(%s)' % ( str( self._getconst( token)))
-            if token in functions :
-                #if not self._isfunc( token) :
-                #    kklog_fatal( 'function not defined  [token=%s]' % ( token))
-                tokenreplace = str( self._getfunc( token))
-            expression += tokenreplace
-        return expression
-
-    def _getconst( self, _token) :
-        return kkopt_defines.value( _token)
-
-    def _isfunc( self, _token) :
-        return _token in kkopt_functions.functions
-
-    def _getfunc( self, _token) :
-        return kkopt_functions.name( _token)
-
     def get_data( self, _target, _index=None) :
 
         data_out = pd.DataFrame()
@@ -256,16 +185,20 @@ class spot_setup(object):
             if self._setting.calibrations[i][_target]['datasource'].has_provider:
                 self._setting.calibrations[i][_target]['datasource'].provider.execute()
             datasource_name = self._setting.calibrations[i][_target]['datasource'].name
-            sampletime = self._setting.calibrations[i]['sampletime']
+
             entity = self._setting.calibrations[i][_target]['entity']
             path = self._setting.calibrations[i][_target]['datasource'].path
             data = pd.read_csv( path, header=0, na_values=['-99.99','na','nan'], comment='#', sep="\t")
             data = self.canonicalize_headernames( data)
 
-            t_from, t_to = sampletime.split( '->')
-            eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
-            eval_data = eval_data.set_index('datetime')
-            eval_data.index = pd.to_datetime(eval_data.index)
+            if 'sampletime' in self._setting.calibrations[i]:
+                sampletime = self._setting.calibrations[i]['sampletime']
+                t_from, t_to = sampletime.split( '->')
+                eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
+                eval_data = eval_data.set_index('datetime')
+                eval_data.index = pd.to_datetime(eval_data.index)
+            else:
+                eval_data = data
 
             if 'filter' in self._setting.calibrations[i][_target]:
                 for f in self._setting.calibrations[i][_target]['filter']:
@@ -278,6 +211,7 @@ class spot_setup(object):
             eval_data = eval(expression).to_frame()
             eval_data.rename(columns={entity: self._setting.calibrations[i]['id']}, inplace=True)
             data_out = pd.concat([data_out, eval_data])
+
         if _index is not None:
             collect_data = pd.DataFrame()
             for c in data_out.columns:
@@ -301,6 +235,7 @@ class spot_setup(object):
     @property
     def repetitions( self) :
         return self._setting.repetitions
+
     # This function is needed for spotpy to compare simulation and validation data
     # Keep in mind, that you reduce your simulation data to the values that can be compared with observation data
     # This can be done in the def simulation (than only those simulations are saved), 
@@ -324,16 +259,26 @@ class spot_setup(object):
     def run_simulation( self) :
 
         models = []
-        for submodel in self._setting.properties['model']['submodels']:
-            program = os.path.expandvars( submodel['binary'])
+        if 'submodels' in self._setting.properties['model']:
+            for submodel in self._setting.properties['model']['submodels']:
+                program = os.path.expandvars( submodel['binary'])
+                argument = ''
+                for arg in submodel['arguments'] :
+                    argument = argument + os.path.expandvars( arg) + ' '
+                models.append( program+" "+argument + " > /dev/null 2>&1")
+        else:
+            program = os.path.expandvars( self._setting.properties['model']['binary'])
             argument = ''
-            for arg in submodel['arguments'] :
+            for arg in self._setting.properties['model']['arguments'] :
                 argument = argument + os.path.expandvars( arg) + ' '
-            models.append( program+" "+argument + "> /dev/null 2>&1")
+            models.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+2))# + " > /dev/null 2>&1")
 
         t0 = time.time()
 
-        if self._setting.properties['model']['mode'] == 'parallel':
+        kklog_info('Model run %s' %models[-1])
+        kklog_info('Rank %s' %str( MPI.COMM_WORLD.Get_rank()+2))
+
+        if True: #self._setting.properties['model']['mode'] == 'parallel':
 
             # List to store subprocess objects
             processes = []
@@ -353,13 +298,12 @@ class spot_setup(object):
 
         return (rcs.sum(), round( (t1-t0),2))
 
-
     def update_parameters( self, _parameters=None):
         # open the source file and read it
         subject = ''
         with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
             subject = f.read()
-        
+
         if _parameters is not None:
             p_index = 0
             for k,v in self._setting.parameters.items() :
@@ -372,7 +316,7 @@ class spot_setup(object):
 
         # write the file
         import shutil
-        Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp')
+        Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_'+str(MPI.COMM_WORLD.Get_rank()+2))
         if not os.path.exists( Lresources_path):
             os.makedirs( Lresources_path)
         if not os.path.exists( Lresources_path+"/udunits2"):
@@ -395,7 +339,6 @@ class spot_setup(object):
         elif rc > 0:
             kklog_warn("model call not successful")
             self._simulation = pd.DataFrame( np.nan, index=range(self._simulation.shape[0]), columns=self._simulation.columns)
-
         return self._simulation['all'].squeeze().values
 
     def evaluation( self):
@@ -406,18 +349,18 @@ class spot_setup(object):
 
         results = _sampler.getdata()
 
-        try:
-            spotpy.analyser.plot_fast_sensitivity( results, number_of_sensitiv_pars=3)
-        except:
-            pass
+        #try:
+        #    spotpy.analyser.plot_fast_sensitivity( results, number_of_sensitiv_pars=3)
+        #except:
+        #    pass
 
-        self.postprocess( np.asarray([np.asarray(item) for item in results.astype(object)]))
+        #self.postprocess( np.asarray([np.asarray(item) for item in results.astype(object)]))
 
     def postprocess( self, _results):
         if self._setting.outputformat == 'csv':
 
             par_list = [p.name for p in self.params]
-            
+
             #get data
             results = np.transpose( _results)
 
@@ -430,7 +373,7 @@ class spot_setup(object):
                 df_par[n] = c
 
             df_par.to_csv( self._setting.output+"_like.csv", index=False)
-            
+
             results = results[len(par_list)+1:-1]
             results = pd.DataFrame(results, columns=["TEMP_"+str(i+1) for i in range(len(results[0]))])
             results['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
@@ -455,7 +398,7 @@ class spot_setup(object):
             for par, x in zip(par_list, ax.flat):
 
                 df.hist(column=par, bins=nd_bins, grid=True, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
-                
+
                 # Despine
                 x.spines['right'].set_visible(False)
                 x.spines['top'].set_visible(False)
@@ -472,7 +415,7 @@ class spot_setup(object):
                 #x.set_xlim(0,1)
                 x.set_yticklabels([])
             fig.savefig("histogram.png")
-            
+
 
 def main():
 
@@ -497,7 +440,7 @@ def main():
     sampler = lspotpy_functions[setup.method]( setup,
                                                dbname=project.setting.output, 
                                                dbformat=project.setting.outputformat, 
-                                               parallel='seq')
+                                               parallel = 'mpi')
     sampler.sample( setup.repetitions)
 
     setup.finalize( sampler)
