@@ -138,6 +138,7 @@ class spot_setup(object):
         self._configuration = _config
         ##get all settings 
         self._setting = _project.setting
+        self._parallel = _project.parallel
 
         #self._calibrations = _project.calibrations
         self.likes = []
@@ -150,6 +151,7 @@ class spot_setup(object):
         #utils.kklog.log_info('Start test simulation')
         self.update_parameters( None)
         self.run_simulation()
+        self.simulation_counter = 0
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
@@ -167,6 +169,10 @@ class spot_setup(object):
                                                           v['maxvalue'],
                                                           v['initialvalue'],
                                                           v['step']))
+
+    @property
+    def parallel( self) :
+        return self._parallel
 
     def parameters( self) :
         return spotpy.parameter.generate( self.params)
@@ -256,43 +262,40 @@ class spot_setup(object):
         self.likes.append( np.append( L, L.mean()))
         return L.mean()
 
-    def run_simulation( self) :
+    def run_simulation( self, _parallel = False) :
 
-        models = []
+
         if 'submodels' in self._setting.properties['model']:
-            for submodel in self._setting.properties['model']['submodels']:
-                program = os.path.expandvars( submodel['binary'])
-                argument = ''
-                for arg in submodel['arguments'] :
-                    argument = argument + os.path.expandvars( arg) + ' '
-                models.append( program+" "+argument + " > /dev/null 2>&1")
+            models = self._setting.properties['model']['submodels']
         else:
+            models = [self._setting.properties['model']]
+
+        model_calls = []
+        for submodel in models:
             program = os.path.expandvars( self._setting.properties['model']['binary'])
             argument = ''
             for arg in self._setting.properties['model']['arguments'] :
                 argument = argument + os.path.expandvars( arg) + ' '
-            models.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+2))# + " > /dev/null 2>&1")
-
+            if self.parallel:
+                model_calls.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+2) + " > /dev/null 2>&1")
+            else:
+                model_calls.append( program+" "+argument + " > /dev/null 2>&1")
+            kklog_debug('%s' %str(model_calls[-1]))
         t0 = time.time()
 
-        kklog_info('Model run %s' %models[-1])
-        kklog_info('Rank %s' %str( MPI.COMM_WORLD.Get_rank()+2))
+        # List to store subprocess objects
+        processes = []
 
-        if True: #self._setting.properties['model']['mode'] == 'parallel':
+        # Start each command as a subprocess
+        for m in model_calls:
+            # Use shell=True to run the command through the shell
+            process = subprocess.Popen( m, shell=True)
+            processes.append(process)
 
-            # List to store subprocess objects
-            processes = []
-
-            # Start each command as a subprocess
-            for m in models:
-                # Use shell=True to run the command through the shell
-                process = subprocess.Popen( m, shell=True)
-                processes.append(process)
-
-            # Wait for all processes to complete
-            rcs = np.array([])
-            for process in processes:
-                rcs = np.append( rcs, process.wait())
+        # Wait for all processes to complete
+        rcs = np.array([])
+        for process in processes:
+            rcs = np.append( rcs, process.wait())
 
         t1 = time.time()
 
@@ -316,7 +319,10 @@ class spot_setup(object):
 
         # write the file
         import shutil
-        Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_'+str(MPI.COMM_WORLD.Get_rank()+2))
+        if self.parallel:
+            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_'+str(MPI.COMM_WORLD.Get_rank()+2))
+        else:
+            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_1')
         if not os.path.exists( Lresources_path):
             os.makedirs( Lresources_path)
         if not os.path.exists( Lresources_path+"/udunits2"):
@@ -328,8 +334,12 @@ class spot_setup(object):
 
         if _parameters is not None:
             self.update_parameters( _parameters)
- 
+
+        kklog_info('Model run %s' %str(self.simulation_counter+1))
+        if self.parallel:
+            kklog_info('Rank %s' %str( MPI.COMM_WORLD.Get_rank()+2))
         (rc,time) = self.run_simulation()
+        self.simulation_counter += 1
         kklog_debug('Simulation duration %s s' %str(time))
 
         self._simulation = self.get_data( 'simulation', self._evaluation)
@@ -419,6 +429,11 @@ class spot_setup(object):
 
 def main():
 
+    comm = MPI.COMM_WORLD
+    if comm.Get_size() > 1:
+        parallel = True
+    else:
+        parallel = False
     kkplot_env = kkexpand( '${HOME}')+'/.kkplot/kkplot.env'
     if ( exists( kkplot_env)) :
         load_dotenv( kkplot_env)
@@ -430,17 +445,25 @@ def main():
     config = utils.configuration()
 
     ### Calibration project
-    project = kkopt_project( config)
+    project = kkopt_project( config, _parallel = parallel)
 
     ### Spotpy setup
     setup = spot_setup( config, project)
 
-    lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs, 'fast': spotpy.algorithms.fast,
+    lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs,
+                                'fast': spotpy.algorithms.fast,
                                 'mcmc': spotpy.algorithms.mcmc})
-    sampler = lspotpy_functions[setup.method]( setup,
-                                               dbname=project.setting.output, 
-                                               dbformat=project.setting.outputformat, 
-                                               parallel = 'mpi')
+
+
+    if project.parallel:
+        sampler = lspotpy_functions[setup.method]( setup,
+                                                   dbname=project.setting.output,
+                                                   dbformat=project.setting.outputformat,
+                                                   parallel = 'mpi')
+    else:
+        sampler = lspotpy_functions[setup.method]( setup,
+                                                   dbname=project.setting.output,
+                                                   dbformat=project.setting.outputformat)
     sampler.sample( setup.repetitions)
 
     setup.finalize( sampler)

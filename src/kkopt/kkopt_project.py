@@ -9,13 +9,18 @@ import numexpr as numexpr
 
 
 class kkopt_project( object) :
-    def __init__( self, _conf, _pf_format='yaml') :
+    def __init__( self, _conf, _parallel = False, _pf_format='yaml') :
 
         self._conf = _conf
         self._setting = kkopt_setting()
+        self._parallel = _parallel
         if _pf_format == 'yaml' :
             pf_reader = pfreader_yaml( _conf)
             self._setting = pf_reader._setting
+
+    @property
+    def parallel( self) :
+        return self._parallel
 
     @property
     def setting( self) :
