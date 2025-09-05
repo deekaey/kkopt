@@ -1,32 +1,34 @@
 #!/bin/bash
 
 import string
-import os
 import sys
+import os
 from os.path import exists
 from dotenv import load_dotenv
 import time
 import re
 import pandas as pd
 import numpy as np
-import math
-from kkplot.kkutils.expand import *
-from kkplot.kkutils.log import *
-import kkopt.kkutils as utils
-import numpy
-import spotpy
-from kkopt.kkopt_project import kkopt_project 
 import numexpr as numexpr
-from kkplot.kksources import kkplot_sourcefactory as kkplot_sourcefactory
-from kkplot.kkplot_dviplot import *
-from kkplot.kkplot_figure import DSSEP
+import math
+import scipy
+import spotpy
 import matplotlib.pyplot as plt
 import subprocess
-
+import seaborn as sns
 try:
     from mpi4py import MPI
 except ImportError:
     raise Exception("MPI python module mpi4py not available. Exit!")
+
+from kkplot.kkutils.expand import *
+from kkplot.kkutils.log import *
+from kkplot.kksources import kkplot_sourcefactory as kkplot_sourcefactory
+from kkplot.kkplot_dviplot import *
+from kkplot.kkplot_figure import DSSEP
+
+import kkopt.kkutils as utils
+from kkopt.kkopt_project import kkopt_project 
 
 
 class lspotpy_object_factories( object) :
@@ -157,18 +159,24 @@ class spot_setup(object):
         temp = self.get_data( 'simulation')
         self._evaluation = self.get_data( 'evaluation', temp)
         self._simulation = self.get_data( 'simulation', self._evaluation)
+
+        df_tmp = pd.concat([self._evaluation['all'], self._simulation['all']], axis=1, keys=['evaluation', 'simulation'])
+        df_tmp.to_csv( f"{self._setting.output}_base.csv");
+
         self._simulation_default = self._simulation
         self.objectivefunction( self._simulation, self._evaluation)
 
         #prepare parameters
         self.params = []
-        for k,v in self._setting.parameters.items() :
-            if v['distribution'] == 'uniform':
-                self.params.append( spotpy.parameter.Uniform( k,
-                                                          v['minvalue'],
-                                                          v['maxvalue'],
-                                                          v['initialvalue'],
-                                                          v['step']))
+        for k1,v1 in self._setting.parameters.items() :
+            if len(self._setting.parameters) == 1:
+                for k2,v2 in v1.items() :
+                    if v2['distribution'] == 'uniform':
+                        self.params.append( spotpy.parameter.Uniform( k2,
+                                                                  v2['minvalue'],
+                                                                  v2['maxvalue'],
+                                                                  v2['initialvalue'],
+                                                                  v2['step']))
 
     @property
     def parallel( self) :
@@ -194,6 +202,11 @@ class spot_setup(object):
 
             entity = self._setting.calibrations[i][_target]['entity']
             path = self._setting.calibrations[i][_target]['datasource'].path
+            if self.parallel:
+                path = path + str(MPI.COMM_WORLD.Get_rank()+1)
+                path = path.replace( "RANK", "r"+str(MPI.COMM_WORLD.Get_rank()+1))
+            else:
+                path = path.replace( "RANK", "r1")
             data = pd.read_csv( path, header=0, na_values=['-99.99','na','nan'], comment='#', sep="\t")
             data = self.canonicalize_headernames( data)
 
@@ -208,13 +221,20 @@ class spot_setup(object):
 
             if 'filter' in self._setting.calibrations[i][_target]:
                 for f in self._setting.calibrations[i][_target]['filter']:
+
                     for k,v in f.items():
+
                         eval_data = eval_data.loc[eval_data[k].isin(v),]
             eval_data = eval_data[[entity]]
 
+
             expression = self._setting.calibrations[i][_target]['expression']
             expression = expression.replace( entity+DSSEP+datasource_name, 'eval_data["%s"]' %entity)
-            eval_data = eval(expression).to_frame()
+            try:
+                eval_data = eval(expression).to_frame()
+            except TypeError:
+                print( f"TypeError: {expression}\n{eval_data.head()}")
+                sys.exit( 255)
             eval_data.rename(columns={entity: self._setting.calibrations[i]['id']}, inplace=True)
             data_out = pd.concat([data_out, eval_data])
 
@@ -277,10 +297,10 @@ class spot_setup(object):
             for arg in self._setting.properties['model']['arguments'] :
                 argument = argument + os.path.expandvars( arg) + ' '
             if self.parallel:
-                model_calls.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+2) + " > /dev/null 2>&1")
+                model_calls.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+1) + " > /dev/null 2>&1")
             else:
                 model_calls.append( program+" "+argument + " > /dev/null 2>&1")
-            kklog_debug('%s' %str(model_calls[-1]))
+            kklog_debug( f'Rank {str(MPI.COMM_WORLD.Get_rank())}: %s' %str(model_calls[-1]))
         t0 = time.time()
 
         # List to store subprocess objects
@@ -309,18 +329,22 @@ class spot_setup(object):
 
         if _parameters is not None:
             p_index = 0
-            for k,v in self._setting.parameters.items() :
-                search = re.search(r'.*\.%s\..*' % v['name'], subject)
-                #todo: add log warning
-                if search != None:
-                    pattern = re.compile(r'.*\.%s\..*' % v['name'])
-                    subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
-                p_index += 1
+
+            for k1,v1 in self._setting.parameters.items() :
+                if len(self._setting.parameters) == 1:
+                    for k2,v2 in v1.items() :
+
+                        search = re.search(r'.*\.%s\..*' % v2['name'], subject)
+                        #todo: add log warning
+                        if search != None:
+                            pattern = re.compile(r'.*\.%s\..*' % v2['name'])
+                            subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
+                        p_index += 1
 
         # write the file
         import shutil
         if self.parallel:
-            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_'+str(MPI.COMM_WORLD.Get_rank()+2))
+            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_'+str(MPI.COMM_WORLD.Get_rank()+1))
         else:
             Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_1')
         if not os.path.exists( Lresources_path):
@@ -335,7 +359,7 @@ class spot_setup(object):
         if _parameters is not None:
             self.update_parameters( _parameters)
 
-        kklog_info('Model run %s' %str(self.simulation_counter+1))
+        kklog_debug('Model run %s' %str(self.simulation_counter+1))
         if self.parallel:
             kklog_info('Rank %s' %str( MPI.COMM_WORLD.Get_rank()+2))
         (rc,time) = self.run_simulation()
@@ -356,76 +380,189 @@ class spot_setup(object):
 
     #write spoty output more userfriendly
     def finalize( self, _sampler) :
-
-        results = _sampler.getdata()
-
+        pass
+        #results = _sampler.getdata()
         #try:
         #    spotpy.analyser.plot_fast_sensitivity( results, number_of_sensitiv_pars=3)
         #except:
         #    pass
 
-        #self.postprocess( np.asarray([np.asarray(item) for item in results.astype(object)]))
+def postprocess(project):
 
-    def postprocess( self, _results):
-        if self._setting.outputformat == 'csv':
+    base = pd.read_csv(f"{project.setting.output}_base.csv")
+    base = base.set_index( pd.to_datetime(base.datetime))
 
-            par_list = [p.name for p in self.params]
+    percentile_threshold = 0.2
+    delimiter = ','
+    observed_values = None
+    observed_values = base['evaluation']
+    like_type = "R2"
 
-            #get data
-            results = np.transpose( _results)
+    # === DATEN EINLESEN ===
+    df = pd.read_csv( project.output_file, delimiter=delimiter)
 
-            sorted_indices = np.argsort(results[0])[::-1]
-            results = results[:, sorted_indices]
+    # === SPALTEN IDENTIFIZIEREN ===
+    like_col = 'like1'
+    param_cols = [col for col in df.columns if col.startswith('par')]
+    sim_cols = [col for col in df.columns if col.startswith('simulation_')]
 
-            df_par = results[:len(par_list)+1]
-            df_par = pd.DataFrame({'likelihood': df_par[0]})
-            for n,c in zip(par_list, results[1:len(par_list)+1]):
-                df_par[n] = c
 
-            df_par.to_csv( self._setting.output+"_like.csv", index=False)
+    if like_type == "R2":
+        df["R2"] = df[sim_cols].apply(lambda row: spotpy.objectivefunctions.rsquared(row.values, observed_values), axis=1)
+        df_sorted = df.sort_values(by=like_col, ascending=False)
+        top_n = int(len(df_sorted) * percentile_threshold)
+        df_top = df_sorted.head(top_n)
+    else:
+        df["RMSE"] = df[sim_cols].apply(lambda row: spotpy.objectivefunctions.rmse(row.values, observed_values), axis=1)
+        df_sorted = df.sort_values(by="RMSE", ascending=True)  # kleiner RMSE = besser
+        top_n = int(len(df_sorted) * percentile_threshold)
+        df_top = df_sorted.head(top_n)
 
-            results = results[len(par_list)+1:-1]
-            results = pd.DataFrame(results, columns=["TEMP_"+str(i+1) for i in range(len(results[0]))])
-            results['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
+    os.makedirs(project.output_dir, exist_ok=True)
 
-            #add time from evaluation data and write file
-            self._evaluation['index'] = np.arange( len(self._evaluation))
-            for c in self._setting.calibrations:
-                ev_index = self._evaluation['index'].loc[self._evaluation[c['id']].notna()]
-                header = [h.replace('TEMP', c['id']) for h in results.columns]
-                
-                data_out = results.iloc[ev_index]
-                data_out.columns = header
-                data_out["default"] = self._simulation_default[c['id']].dropna().values
-                data_out.to_csv(f"{self._setting.output}_{c['id']}.kkplot", sep="\t", index=False)
 
-            fig, ax = plt.subplots(nrows=math.ceil(5/3), ncols=3, figsize=(10, 4))
-            nd_bins = 10
+    # === PARAMETERVERTEILUNGEN DER TOP-LÄUFE ===
+    n_params = len(param_cols)
+    cols_per_row = 5
+    n_rows = math.ceil(n_params / cols_per_row)
 
-            # Filter the DataFrame to get the top 5% largest values
-            df = df_par[df_par['likelihood'] >= df_par['likelihood'].quantile(0.9)]
-            #df = df_par.nlargest(50, ['likelihood'])
-            for par, x in zip(par_list, ax.flat):
+    plt.figure(figsize=(cols_per_row * 3, n_rows * 3))
+    for i, param in enumerate(param_cols):
+        plt.subplot(n_rows, cols_per_row, i + 1)
+        sns.histplot(df_top[param], kde=True)
+        plt.title(param)
+    plt.tight_layout()
+    plt.suptitle(f"Parameterverteilungen (Top {int(percentile_threshold*100)}%)", y=1.02)
+    param_plot_path = os.path.join( project.output_dir, f"parameters_{like_type}.png")
+    plt.savefig(param_plot_path, dpi=300)
+    plt.close()
 
-                df.hist(column=par, bins=nd_bins, grid=True, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
 
-                # Despine
-                x.spines['right'].set_visible(False)
-                x.spines['top'].set_visible(False)
-                x.spines['left'].set_visible(False)
+    # === BESTE SIMULATION UND TOP-SIMULATIONEN ===
+    sim_array = df_top[sim_cols].to_numpy()
+    best_sim = df_sorted.iloc[0][sim_cols].to_numpy()
+    n_steps = sim_array.shape[1]
 
-                # Switch off ticks
-                x.tick_params(axis="both", which="both", bottom="off", top="off", labelbottom="on", left="off", right="off", labelleft="off")
+    # Unsicherheitsbalken berechnen (z. B. 5.–95. Perzentil)
+    lower = np.percentile(sim_array, 5, axis=0)
+    upper = np.percentile(sim_array, 95, axis=0)
+    error = [np.maximum(0.0, best_sim - lower), np.maximum( 0.0, upper - best_sim)]  # asymmetrisch
+    #error = best_sim
+    # === SCATTERPLOT MIT FEHLERBALKEN ===
 
-                x.set_title("")
+    best_like = df_sorted.iloc[0][like_type]
+    min_val = min(observed_values.min(), best_sim.min())
+    max_val = max(observed_values.max(), best_sim.max())
 
-                # Set x-axis label
-                x.set_xlabel(par[3:]) #, labelpad=20, weight='bold', size=12)
 
-                #x.set_xlim(0,1)
-                x.set_yticklabels([])
-            fig.savefig("histogram.png")
 
+    import matplotlib.gridspec as gridspec
+
+    # Get parameter values for the best simulation
+    best_params = df_sorted.iloc[0][param_cols]
+
+    # Set up figure with GridSpec
+    fig = plt.figure(figsize=(10, 6))
+    gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1])  # plot on left, table on right
+
+    # === SCATTER PLOT ===
+    ax0 = fig.add_subplot(gs[0])
+    ax0.errorbar(observed_values, best_sim, yerr=error, fmt='o', ecolor='lightblue', alpha=0.6,
+                 label=f'Unsicherheitsband (Top {int(percentile_threshold*100)}%)')
+    ax0.plot([min_val, max_val], [min_val, max_val], 'r--', label='1:1 Linie')
+    ax0.scatter(observed_values, best_sim, color='blue',
+                label=f'Beste Simulation (like1 = {best_like:.3f})')
+
+    ax0.set_xlabel("Beobachtete Werte")
+    ax0.set_ylabel("Simulierte Werte")
+    ax0.set_title("Beste Simulation mit Unsicherheitsband")
+    ax0.set_xlim(0, 1.1 * max_val)
+    ax0.set_ylim(0, 1.1 * max_val)
+    ax0.set_aspect('equal', adjustable='box')
+    ax0.legend()
+
+    # === PARAMETER TABLE ===
+    ax1 = fig.add_subplot(gs[1])
+    ax1.axis('off')  # turn off the axis
+
+    # Prepare table data
+    table_data = [[param, f"{value:.4g}"] for param, value in best_params.items()]
+
+    table = ax1.table(cellText=table_data, colLabels=["Parameter", "Wert"], loc='center', cellLoc='left')
+    table.scale(3, 1.5)
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+
+    for (row, col), cell in table.get_celld().items():
+        if col == 1:
+            cell.set_width(0.5)  # Adjust for better spacing (default ~0.05)
+            cell.set_text_props(ha='left', va='center')  # Better text alignment
+
+    # Save combined figure
+    scatter_plot_path = os.path.join( project.output_dir, f"opt_{like_type}_with_table.png")
+    plt.tight_layout()
+    plt.savefig(scatter_plot_path, dpi=300)
+    plt.close()
+
+    return
+    if self._setting.outputformat == 'csv':
+
+        par_list = [p.name for p in self.params]
+
+        #get data
+        results = np.transpose( _results)
+
+        sorted_indices = np.argsort(results[0])[::-1]
+        results = results[:, sorted_indices]
+
+        df_par = results[:len(par_list)+1]
+        df_par = pd.DataFrame({'likelihood': df_par[0]})
+        for n,c in zip(par_list, results[1:len(par_list)+1]):
+            df_par[n] = c
+
+        df_par.to_csv( self._setting.output+"_like.csv", index=False)
+
+        results = results[len(par_list)+1:-1]
+        results = pd.DataFrame(results, columns=["TEMP_"+str(i+1) for i in range(len(results[0]))])
+        results['datetime'] = self._evaluation.index.strftime('%Y-%m-%d 00:%M:%S')
+
+        #add time from evaluation data and write file
+        self._evaluation['index'] = np.arange( len(self._evaluation))
+        for c in self._setting.calibrations:
+            ev_index = self._evaluation['index'].loc[self._evaluation[c['id']].notna()]
+            header = [h.replace('TEMP', c['id']) for h in results.columns]
+
+            data_out = results.iloc[ev_index]
+            data_out.columns = header
+            data_out["default"] = self._simulation_default[c['id']].dropna().values
+            data_out.to_csv(f"{self._setting.output}_{c['id']}.kkplot", sep="\t", index=False)
+
+        fig, ax = plt.subplots(nrows=math.ceil(5/3), ncols=3, figsize=(10, 4))
+        nd_bins = 10
+
+        # Filter the DataFrame to get the top 5% largest values
+        df = df_par[df_par['likelihood'] >= df_par['likelihood'].quantile(0.9)]
+        #df = df_par.nlargest(50, ['likelihood'])
+        for par, x in zip(par_list, ax.flat):
+
+            df.hist(column=par, bins=nd_bins, grid=True, color='#86bf91', zorder=2, rwidth=0.9, ax=x)
+
+            # Despine
+            x.spines['right'].set_visible(False)
+            x.spines['top'].set_visible(False)
+            x.spines['left'].set_visible(False)
+
+            # Switch off ticks
+            x.tick_params(axis="both", which="both", bottom="off", top="off", labelbottom="on", left="off", right="off", labelleft="off")
+
+            x.set_title("")
+
+            # Set x-axis label
+            x.set_xlabel(par[3:]) #, labelpad=20, weight='bold', size=12)
+
+            #x.set_xlim(0,1)
+            x.set_yticklabels([])
+        fig.savefig("histogram.png")
 
 def main():
 
@@ -447,27 +584,37 @@ def main():
     ### Calibration project
     project = kkopt_project( config, _parallel = parallel)
 
-    ### Spotpy setup
-    setup = spot_setup( config, project)
+    if not config.nosim():
+        setup = spot_setup( config, project)
+        ### Spotpy setup
+        setup = spot_setup( config, project)
 
-    lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs,
-                                'fast': spotpy.algorithms.fast,
-                                'mcmc': spotpy.algorithms.mcmc})
+        lspotpy_functions = dict( { 'lhs': spotpy.algorithms.lhs,
+                                    'fast': spotpy.algorithms.fast,
+                                    'mcmc': spotpy.algorithms.mcmc})
 
+        if project.parallel:
+            sampler = lspotpy_functions[setup.method]( setup,
+                                                       dbname=project.setting.output,
+                                                       dbformat=project.setting.outputformat,
+                                                       parallel = 'mpi')
+        else:
+            sampler = lspotpy_functions[setup.method]( setup,
+                                                       dbname=project.setting.output,
+                                                       dbformat=project.setting.outputformat)
 
-    if project.parallel:
-        sampler = lspotpy_functions[setup.method]( setup,
-                                                   dbname=project.setting.output,
-                                                   dbformat=project.setting.outputformat,
-                                                   parallel = 'mpi')
-    else:
-        sampler = lspotpy_functions[setup.method]( setup,
-                                                   dbname=project.setting.output,
-                                                   dbformat=project.setting.outputformat)
-    sampler.sample( setup.repetitions)
+        sampler.sample( setup.repetitions)
 
-    setup.finalize( sampler)
+        setup.finalize( sampler)
+
+    postprocess( project)
 
 if __name__ == '__main__' :
 
     main()
+
+
+
+
+
+

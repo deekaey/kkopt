@@ -40,7 +40,6 @@ class kkopt_project( object) :
     def plotfile( self) :
         return  self._pf_name
 
-
     def get_property( self, _property, _default=None) :
         return self._figure.get_property( _property, _default)
 
@@ -48,19 +47,21 @@ class kkopt_project( object) :
     def groupbytag( self) :
         return self._figure.groupbytag
 
-
-
     @property
     def title( self) :
         return self._figure.title
+
     @property
-    def outputfile( self) :
-        of = self._outputfile
+    def output_dir( self) :
+        of = self._setting.output_dir
         if not os.path.isabs( of) :
             of = '%s/%s' % ( self._conf.outputs_dir(), of)
-        if self._conf.bundle :
-            of = of if of.rfind( os.sep) == -1 else of[of.rfind( os.sep)+1:]
         return  of
+
+    @property
+    def output_file( self) :
+        return  self.output_dir+"/"+self._setting.output_file
+
     @property
     def outputfileformat( self) :
         return self._outputfileformat

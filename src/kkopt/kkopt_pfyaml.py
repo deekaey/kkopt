@@ -66,7 +66,11 @@ class kkopt_pfreader_yaml( object) :
                       'parallel']:
                 if self._is_valid( config, i) :
                     if i == 'parameters':
-                        setting.add_parameter_file( kkexpand( config[i]))
+                        if 'path' in config[i]:
+                            setting.add_parameter_file( kkexpand( config[i]['path']))
+                        else:
+                            kklog_error( 'path attribute missing for parameters')
+                            #exit(255)
                     elif type(config[i]) == str:
                         setting.add_property( i, kkexpand( config[i]))
                     else:
@@ -136,9 +140,12 @@ class kkopt_pfreader_yaml( object) :
                                         'entity': terminal_with_source[0],
                                         'datasource': datasource} )
                     if 'filter' in calibration_block[i]:
-                        add_entity.update( {filter: calibration_block[i]['filter']} )
+                        add_entity.update( {'filter': calibration_block[i]['filter']} )
+                    if 'groupby' in calibration_block[i]:
+                        kklog_warn("Keyword 'groupby' is deprecated. Using 'filter' instead.")
+                        add_entity.update( {'filter': calibration_block[i]['groupby']} )
 
-                    add_calibration.update({i: add_entity}) 
+                    add_calibration.update({i: add_entity})
 
             self._setting.calibrations.append( add_calibration)
         return  0

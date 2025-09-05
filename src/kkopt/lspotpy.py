@@ -201,14 +201,14 @@ class spot_setup(object):
 #        except KeyError:
 #            call=int(numpy.random.uniform(low=0,high=999999999))
 #        self.write_parameters(vector,call=call)
-        print 'Start model...'
+        #print 'Start model...'
         t0 = time.time()
 #        os.chdir(self.owd+os.sep+self.version)
 #        path="projects"+os.sep+"grassland"+os.sep+"DE_linden"+os.sep+"DE_linden_"+self.module         
 #        os.system( r"bin"+os.sep+"ldndc -c ldndc.conf "+path+os.sep+"DE_linden_"+self.module+str(call)+".xml")
         #print _parameters
         t1 = time.time()
-        print 'Duration: ' + str( round((t1-t0),2)) + ' s'
+        #print 'Duration: ' + str( round((t1-t0),2)) + ' s'
 
         results = self.get_results()
         if None in results :

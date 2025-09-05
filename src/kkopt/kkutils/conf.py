@@ -33,6 +33,9 @@ class kkopt_configuration( object) :
         parser.add_argument( '--debug', action='store_true', default=False,
             help='switch on debug mode')
 
+        parser.add_argument( '--nosim', action='store_true', default=False,
+            help='switch off simlation runs')
+
         parser.add_argument( '-V', '--version', action='store_true', default=False,
             help='show version')
 
@@ -55,7 +58,8 @@ class kkopt_configuration( object) :
     def  optfile( self) :
         return  self.args.optfile
 
-
+    def  nosim( self) :
+        return  self.args.nosim
     def  outputs_dir( self) :
         return  self.base_dir_for( 'outputs')
     def  tmp_dir( self) :

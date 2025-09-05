@@ -34,8 +34,16 @@ class kkopt_setting( object) :
     def add_parameter_file( self, _parameter_file) :
         pf_stream = open( _parameter_file, 'r')
         content = yaml.load( pf_stream, Loader=yaml.FullLoader)
-        for k,v in content['parameters'].items():
-            self._parameters.update( {k: v})
+
+        for k1,v1 in content['parameters'].items():
+            if type(v1) == dict:
+                self._parameters.update({k1: {}})
+                for k2,v2 in v1.items():
+                    self._parameters[k1].update( {k2: v2})
+            else:
+                self._parameters.update({'default': {}})
+                for k2,v2 in v1.items():
+                    self._parameters[k1].update( {k2: v2})
 
     def add_parameter( self, _parameters) :
         self._parameters.update( _parameters)
@@ -81,6 +89,14 @@ class kkopt_setting( object) :
         return self._simulationtime
 
     @property
+    def output_file( self) :
+        return self._properties['output'].split('/')[-1]
+
+    @property
+    def output_dir( self) :
+        return '/'.join((self._properties['output']).split('/')[:-1])
+
+    @property
     def output( self) :
         return ''.join((self._properties['output']).split('.')[:-1])
 
@@ -97,7 +113,13 @@ class kkopt_setting( object) :
         return self._parameters
 
     def __str__( self) :
-        return str(self._properties) 
+        return f'''properties:
+    {str(self._properties)}
+
+calibrations:
+    {self.calibrations}
+
+'''
 
 #        return 'title=%s; calibrations=%s' \
 #            % ( self._title, ','.join( [ str( self._calibrations[cal]) for cal in self._calibrations]))
