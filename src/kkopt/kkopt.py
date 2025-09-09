@@ -161,7 +161,11 @@ class spot_setup(object):
         self._simulation = self.get_data( 'simulation', self._evaluation)
 
         df_tmp = pd.concat([self._evaluation['all'], self._simulation['all']], axis=1, keys=['evaluation', 'simulation'])
-        df_tmp.to_csv( f"{self._setting.output}_base.csv");
+
+        output_path = f"{self._setting.output}_base.csv"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        df_tmp.to_csv( output_path)
+        #df_tmp.to_csv( f"{self._setting.output}_base.csv")
 
         self._simulation_default = self._simulation
         self.objectivefunction( self._simulation, self._evaluation)
