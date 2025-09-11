@@ -30,20 +30,21 @@ class kkopt_setting( object) :
 
         self.calibrations = []
 
-
-    def add_parameter_file( self, _parameter_file) :
+    def add_parameter_file( self, _parameter_file, _use='default') :
         pf_stream = open( _parameter_file, 'r')
         content = yaml.load( pf_stream, Loader=yaml.FullLoader)
 
+        self._parameters = dict()
         for k1,v1 in content['parameters'].items():
-            if type(v1) == dict:
-                self._parameters.update({k1: {}})
+
+            if 'name' in v1 and 'distribution' in v1:
+                self._parameters.update( {k1: {}})
                 for k2,v2 in v1.items():
                     self._parameters[k1].update( {k2: v2})
             else:
-                self._parameters.update({'default': {}})
-                for k2,v2 in v1.items():
-                    self._parameters[k1].update( {k2: v2})
+                if k1 == _use:
+                    for k2,v2 in v1.items():
+                        self._parameters.update( {k2: v2})
 
     def add_parameter( self, _parameters) :
         self._parameters.update( _parameters)
@@ -78,8 +79,8 @@ class kkopt_setting( object) :
 
     @property
     def repetitions( self) :
-        return self._properties['repititions']
-    
+        return self._properties['repetitions']
+
     @property
     def method( self) :
         return self._properties['method']

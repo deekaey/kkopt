@@ -172,15 +172,13 @@ class spot_setup(object):
 
         #prepare parameters
         self.params = []
-        for k1,v1 in self._setting.parameters.items() :
-            if len(self._setting.parameters) == 1:
-                for k2,v2 in v1.items() :
-                    if v2['distribution'] == 'uniform':
-                        self.params.append( spotpy.parameter.Uniform( k2,
-                                                                  v2['minvalue'],
-                                                                  v2['maxvalue'],
-                                                                  v2['initialvalue'],
-                                                                  v2['step']))
+        for k,v in self._setting.parameters.items() :
+            if v['distribution'] == 'uniform':
+                self.params.append( spotpy.parameter.Uniform( k,
+                                                          v['minvalue'],
+                                                          v['maxvalue'],
+                                                          v['initialvalue'],
+                                                          v['step']))
 
     @property
     def parallel( self) :
@@ -334,16 +332,13 @@ class spot_setup(object):
         if _parameters is not None:
             p_index = 0
 
-            for k1,v1 in self._setting.parameters.items() :
-                if len(self._setting.parameters) == 1:
-                    for k2,v2 in v1.items() :
-
-                        search = re.search(r'.*\.%s\..*' % v2['name'], subject)
-                        #todo: add log warning
-                        if search != None:
-                            pattern = re.compile(r'.*\.%s\..*' % v2['name'])
-                            subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
-                        p_index += 1
+            for k,v in self._setting.parameters.items() :
+                search = re.search(r'.*\.%s\..*' % v['name'], subject)
+                #todo: add log warning
+                if search != None:
+                    pattern = re.compile(r'.*\.%s\..*' % v['name'])
+                    subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
+                p_index += 1
 
         # write the file
         import shutil
@@ -400,7 +395,7 @@ def postprocess(project):
     delimiter = ','
     observed_values = None
     observed_values = base['evaluation']
-    like_type = "R2"
+    like_type = "RMSE"
 
     # === DATEN EINLESEN ===
     df = pd.read_csv( project.output_file, delimiter=delimiter)

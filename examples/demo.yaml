@@ -6,7 +6,7 @@ configuration:
 
   sampletime: '2021-01-02->2021-01-09'
 
-  repititions: 3
+  repetitions: 3
 
   model: { binary: '/Users/kraus-d/local/clang-release/bin/ldndc', 
            arguments: [ '-c /Users/kraus-d/.ldndc/release/ldndc_model_inputs.conf', 

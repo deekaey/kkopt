@@ -59,15 +59,18 @@ class kkopt_pfreader_yaml( object) :
             calibration_output = kkexpand( calibration_output)
 
             for i in ['simulationtime', 'sampletime', 
-                      'repititions', 'model',
-                      'method', 'likelihood', 
+                      'repetitions', 'model',
+                      'method', 'likelihood',
                       'parameterdistribution', 'parameters', 
                       'output', 'outputformat', 
                       'parallel']:
                 if self._is_valid( config, i) :
                     if i == 'parameters':
+                        use = 'default'
+                        if 'use' in config[i]:
+                            use = config[i]['use']
                         if 'path' in config[i]:
-                            setting.add_parameter_file( kkexpand( config[i]['path']))
+                            setting.add_parameter_file( kkexpand( config[i]['path']), use)
                         else:
                             kklog_error( 'path attribute missing for parameters')
                             #exit(255)
