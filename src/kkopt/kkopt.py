@@ -249,7 +249,9 @@ class spot_setup(object):
                 collect_data = pd.concat([collect_data, column_data])
             collect_data['all'] = collect_data.sum(axis=1)
             return collect_data
+
         data_out['all'] = data_out.sum(axis=1)
+
         return data_out
 
     @property
@@ -324,9 +326,16 @@ class spot_setup(object):
         return (rcs.sum(), round( (t1-t0),2))
 
     def update_parameters( self, _parameters=None):
+
+        editor = self._setting.properties['model']['agent']
+        provider = editor['provider']
+        L_input = os.path.expandvars( editor['in'])
+        L_output = os.path.expandvars( editor['out'])
+
         # open the source file and read it
         subject = ''
-        with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
+        #with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
+        with open( f"{L_input}/Lresources", 'r') as f:
             subject = f.read()
 
         if _parameters is not None:
@@ -343,14 +352,14 @@ class spot_setup(object):
         # write the file
         import shutil
         if self.parallel:
-            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_'+str(MPI.COMM_WORLD.Get_rank()+1))
-        else:
-            Lresources_path = os.path.expanduser(kkexpand('${HOME}')+'/.ldndc/Lresources_tmp_1')
-        if not os.path.exists( Lresources_path):
-            os.makedirs( Lresources_path)
-        if not os.path.exists( Lresources_path+"/udunits2"):
-            shutil.copytree( kkexpand('${HOME}')+'/.ldndc/udunits2', Lresources_path+'/udunits2')
-        with open(os.path.join( Lresources_path, 'Lresources'), 'w') as f:
+            L_output = f'{L_output}_{str(MPI.COMM_WORLD.Get_rank()+1)}'
+        #else:
+        #    L_output = os.path.expanduser(kkexpand('${HOME}')+f'/.ldndc/{L_output}')
+        if not os.path.exists( L_output):
+            os.makedirs( L_output)
+        if not os.path.exists( L_output+"/udunits2"):
+            shutil.copytree( L_input+"/udunits2", L_output+"/udunits2")
+        with open( f"{L_output}/Lresources", 'w') as f:
             f.write( subject)
 
     def simulation( self, _parameters=None) :
@@ -386,7 +395,7 @@ class spot_setup(object):
         #except:
         #    pass
 
-def postprocess(project):
+def postprocess( project):
 
     base = pd.read_csv(f"{project.setting.output}_base.csv")
     base = base.set_index( pd.to_datetime(base.datetime))
@@ -426,13 +435,20 @@ def postprocess(project):
     n_rows = math.ceil(n_params / cols_per_row)
 
     plt.figure(figsize=(cols_per_row * 3, n_rows * 3))
+
     for i, param in enumerate(param_cols):
         plt.subplot(n_rows, cols_per_row, i + 1)
         sns.histplot(df_top[param], kde=True)
+
+        for j in range(3):
+            best_params = df_sorted.iloc[j]
+            plt.axvline(best_params[param], color="gold", linestyle="--", linewidth=1.5, label="Best run")
+        plt.axvline(project.setting.parameters[param[3:]]["initialvalue"], color="black", linestyle="--", linewidth=1.5, label="Best run")
+
         plt.title(param)
     plt.tight_layout()
     plt.suptitle(f"Parameterverteilungen (Top {int(percentile_threshold*100)}%)", y=1.02)
-    param_plot_path = os.path.join( project.output_dir, f"parameters_{like_type}.png")
+    param_plot_path = os.path.join( project.output_dir, f"{project.setting.output}_parameters_{like_type}.png")
     plt.savefig(param_plot_path, dpi=300)
     plt.close()
 
@@ -498,7 +514,7 @@ def postprocess(project):
             cell.set_text_props(ha='left', va='center')  # Better text alignment
 
     # Save combined figure
-    scatter_plot_path = os.path.join( project.output_dir, f"opt_{like_type}_with_table.png")
+    scatter_plot_path = os.path.join( project.output_dir, f"{project.setting.output}_opt_{like_type}_with_table.png")
     plt.tight_layout()
     plt.savefig(scatter_plot_path, dpi=300)
     plt.close()
@@ -611,8 +627,6 @@ def main():
 if __name__ == '__main__' :
 
     main()
-
-
 
 
 
