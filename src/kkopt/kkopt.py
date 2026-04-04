@@ -288,23 +288,18 @@ class spot_setup(object):
 
     def run_simulation( self, _parallel = False) :
 
+        models = [self._setting.properties['model']]
 
-        if 'submodels' in self._setting.properties['model']:
-            models = self._setting.properties['model']['submodels']
-        else:
-            models = [self._setting.properties['model']]
+        for model in models:
+            program = os.path.expandvars( model['binary'])
+            model_calls = []
+            for call in model['calls']:
+                model_calls.append( program+" "+os.path.expandvars( call) + " > /dev/null 2>&1")
 
-        model_calls = []
-        for submodel in models:
-            program = os.path.expandvars( self._setting.properties['model']['binary'])
-            argument = ''
-            for arg in self._setting.properties['model']['arguments'] :
-                argument = argument + os.path.expandvars( arg) + ' '
-            if self.parallel:
-                model_calls.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+1) + " > /dev/null 2>&1")
-            else:
-                model_calls.append( program+" "+argument + " > /dev/null 2>&1")
-            kklog_debug( f'Rank {str(MPI.COMM_WORLD.Get_rank())}: %s' %str(model_calls[-1]))
+                #argument = argument + os.path.expandvars( arg) + ' '
+                #if self.parallel:
+                #    model_calls.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+1) + " > /dev/null 2>&1")
+                #kklog_debug( f'Rank {str(MPI.COMM_WORLD.Get_rank())}: %s' %str(model_calls[-1]))
         t0 = time.time()
 
         # List to store subprocess objects
