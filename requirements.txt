@@ -10,3 +10,4 @@ pandas
 pyyaml
 seaborn
 mpi4py
+salib
