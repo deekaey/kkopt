@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-
-import glob
 import os
-
-from setuptools import find_packages, setup
+import glob
+from setuptools import setup, find_packages
 
 DISTNAME = "kkopt"
 LICENSE = "MIT"
@@ -13,7 +11,7 @@ URL = "https://github.com/deekaey/kkopt"
 DESCRIPTION = "..."
 CLASSIFIERS = [
     "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: MIT",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python",
@@ -24,21 +22,25 @@ CLASSIFIERS = [
     "Programming Language :: Python :: 3.10",
     "Topic :: Scientific/Engineering",
 ]
-
 PYTHON_REQUIRES = ">=3.7"
 
 here = os.path.abspath(os.path.dirname(__file__))
 
-# Get the long description from the README file
 with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
     LONG_DESCRIPTION = f.read()
 
-# get the dependencies and installs
-with open(os.path.join(here, "requirements.txt"), encoding="utf-8") as f:
-    all_reqs = f.read().split("\n")
-
-INSTALL_REQUIRES = [x.strip() for x in all_reqs if "git+" not in x]
-dependency_links = [x.strip().replace("git+", "") for x in all_reqs if "git+" not in x]
+INSTALL_REQUIRES = [
+    "python-dotenv",  # if 'dotenv' really means this package name
+    "numexpr",
+    "spotpy",
+    "numpy",
+    "pandas",
+    "pyyaml",
+    "seaborn",
+    "mpi4py",
+    "SALib",          # correct PyPI name
+    "kkplot @ git+https://github.com/deekaey/kkplot.git",
+]
 
 setup(
     name=DISTNAME,
@@ -49,20 +51,20 @@ setup(
     classifiers=CLASSIFIERS,
     description=DESCRIPTION,
     long_description=LONG_DESCRIPTION,
+    long_description_content_type="text/markdown",
     url=URL,
+    python_requires=PYTHON_REQUIRES,
     packages=find_packages("src", exclude=["docs", "tests"]),
-    install_requires=INSTALL_REQUIRES,
     package_dir={"": "src"},
     py_modules=[
-        os.path.splitext(os.path.basename(p))[0] for p in glob.glob("src/*.py")
+        os.path.splitext(os.path.basename(p))[0]
+        for p in glob.glob("src/*.py")
     ],
     include_package_data=True,
-    dependency_links=dependency_links,
-        entry_points={
+    install_requires=INSTALL_REQUIRES,
+    entry_points={
         "console_scripts": [
-            "kkopt=kkopt.kkopt:main"
+            "kkopt=kkopt.kkopt:main",
         ]
-    }
+    },
 )
-
-
