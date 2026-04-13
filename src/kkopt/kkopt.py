@@ -1,136 +1,28 @@
 #!/bin/bash
-
-import sys
 import os
 from os.path import exists
-from dotenv import load_dotenv
-import time
 import re
-import pandas as pd
+import subprocess
+
+from dotenv import load_dotenv
 import numpy as np
-import numexpr as numexpr
+import pandas as pd
 import spotpy
 from SALib.sample import saltelli, morris as morris_sample
 from SALib.analyze import sobol, morris as morris_analyze
-import subprocess
+
 try:
     from mpi4py import MPI
 except ImportError:
     raise Exception("MPI python module mpi4py not available. Exit!")
 
-from kkplot.kkutils.expand import *
-from kkplot.kkutils.log import *
-from kkplot.kksources import kkplot_sourcefactory as kkplot_sourcefactory
-from kkplot.kkplot_dviplot import *
+from kkplot.kkutils.expand import kkexpand
+from kkplot.kkutils.log import kklog_debug, kklog_info, kklog_warn
 from kkplot.kkplot_figure import DSSEP
 
 import kkopt.kkutils as utils
-from kkopt.kkopt_project import kkopt_project 
+from kkopt.kkopt_project import kkopt_project
 from kkopt.kkopt_postprocess import postprocess
-
-
-class lspotpy_object_factories( object) :
-    def  __init__( self, _kinds) :
-        self._kinds = _kinds
-        self.factories = dict()
-    @property
-    def  kinds( self) :
-        return  self._kinds
-
-    def  register( self, _kind, _obj) :
-        self.factories[_kind] = _obj
-    def  create( self, _kind, **_kwargs) :
-        if _kind in self.factories :
-            return self.factories[_kind].create( _kwargs)
-        return None
-LSPOTPY_INTERPOLATION_FACTORIES = lspotpy_object_factories( 'interpolators')
-
-class lspotpy_interpolation( object) :
-    def  __init__( self) :
-        pass
-    def interpolate( self, _num) :
-        raise NotImplementedError( 'missing implementation')
-
-class lspotpy_interpolation_factory( object) :
-    def  __init__( self, _kind) :
-        self.kind = _kind
-        LSPOTPY_INTERPOLATION_FACTORIES
-        if not self.kind in LSPOTPY_INTERPOLATION_FACTORIES :
-            LSPOTPY_INTERPOLATION_FACTORIES[self.kind] = self
-
-class lspotpy_interpolation_linear( lspotpy_interpolation) :
-    def  __init__( self, minvalue=numpy.nan, maxvalue=numpy.nan) :
-        super( lspotpy_interpolation_linear, self)
-        self.minvalue = minvalue
-        self.maxvalue = maxvalue
-
-    def  interpolate( self, _num) :
-        return list( numpy.linspace( self.minvalue, self.maxvalue, _num))
- 
-class lspotpy_interpolation_factory_linear( lspotpy_interpolation_factory) :
-    def  __init__( self, _kind) :
-        super( lspotpy_interpolation_factory_linear, self, _kind)
-    def  create( self, **_kwargs) :
-        return  lspotpy_interpolation_linear( _kwargs)
-#__lspotpy_interpolation_factory_linear = lspotpy_interpolation_factory_linear( 'linear')
-
-## Distribution
-class lspotpy_distribution( object) :
-    def  __init__( self, _kind, **_kwargs) :
-        self.kind = _kind
-
-        self.minvalues = None
-        self.maxvalues = None
-        self.values = None
-
-        if 'minvalues' in _kwargs :
-            self.minvalues = _kwargs['minvalues']
-            if not isinstance( self.minvalues, list) :
-                self.minvalues = [ self.minvalues]
-        if 'maxvalues' in _kwargs :
-            self.maxvalues = _kwargs['maxvalues']
-            if not isinstance( self.maxvalues, list) :
-                self.maxvalues = [ self.maxvalues]
-        if 'values' in _kwargs :
-            if self.minvalues is not None or self.maxvalues is not None :
-                raise RuntimeError( 'arguments "minvalues", "maxvalues" or "values" are mutually exclusive')
-            self.values = _kwargs['values']
-
-        if 'interpolation' in _kwargs :
-            self.interpolation = lspotpy_interpolations.create( _kwargs['interpolation'])
-
-        if self.kind == 'uniform' :
-            self.distribution = numpy.random.uniform
-
-    def  sample_continuum( self) :
-        samples = list()
-        for mi, ma in zip( self.minvalues, self.maxvalues) :
-            samples.append( self.distribution( mi, ma))
-
-    def  sample( self, _num) :
-        samples = list()
-        for n in xrange( _num) :
-            samples.append( self.sample_continuum())
-
-def  lspotpy_makedistribution( _kind, **_kwargs) :
-    if _kind in LSPOTPY_INTERPOLATION_FACTORIES :
-        distribution = LSPOTPY_INTERPOLATION_FACTORIES.create( _kind, _kwargs)
-
-class lspotpy_parameter( object) :
-    def  __init__( self, _name) :
-        self.name = _name
-
-        self.values = list()
-        self.minvalue = numpy.nan
-        self.maxvalue = numpy.nan
-        self.initialvalue = numpy.nan
-        self.n_values = 0
-
-        self.distribution = lspotpy_makedistribution( _distribution, _properties)
-
-    def  sample( self) :
-        return  self.distribution.sample( self.n_samples)
-
 
 class spot_setup(object):
     def __init__(self, _config, _project):
