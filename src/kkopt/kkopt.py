@@ -593,29 +593,35 @@ class spot_setup(object):
             kklog_debug(f"Model call: {cmd}")
 
         t0 = time.time()
-        processes = []
+        return_codes = []
 
-        # Start each command as a subprocess
+        # Execute each command sequentially
         for cmd in model_calls:
             try:
-                # If you ever want to capture output, switch to subprocess.Popen([...], ...)
-                process = subprocess.Popen(cmd, shell=True)
+                proc = subprocess.Popen(cmd, shell=True)
             except FileNotFoundError:
                 kklog_warn(f"Executable not found when running: {cmd}")
                 return 1, 0.0
             except Exception as e:
                 kklog_warn(f"Error starting process '{cmd}': {repr(e)}")
                 return 1, 0.0
-            processes.append(process)
 
-        # Wait for all processes to complete
-        return_codes = []
-        for p in processes:
-            rc = p.wait()
+            rc = proc.wait()
             return_codes.append(rc)
+
+            if rc != 0:
+                kklog_warn(f"Model call failed with rc={rc}: {cmd}")
 
         t1 = time.time()
         runtime = round(t1 - t0, 2)
+
+        max_rc = max(return_codes) if return_codes else 0
+        if max_rc != 0:
+            kklog_warn(
+                f"One or more model calls failed, return codes: {return_codes}"
+            )
+
+        return max_rc, runtime
 
         # Aggregate return codes
         # if any command failed (rc != 0), we treat this as failure
