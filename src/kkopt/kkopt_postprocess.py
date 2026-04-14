@@ -327,7 +327,7 @@ def salib_sobol_postprocess(project):
 
         plt.tight_layout()
         heatmap_path = os.path.join(
-            out_dir, f"{project.setting.output}{suffix}_sobol_S2.png"
+            out_dir, f"{project.setting.output}_sobol{suffix}_S2.png"
         )
         plt.savefig(heatmap_path, dpi=300)
         plt.close()
@@ -386,7 +386,7 @@ def salib_morris_postprocess(project):
     plt.tight_layout()
 
     bar_path = os.path.join(
-        out_dir, f"{project.setting.output}{suffix}_morris_mu_sigma_bar.png"
+        out_dir, f"{project.setting.output}_morris{suffix}_mu_sigma_bar.png"
     )
     plt.savefig(bar_path, dpi=300)
     plt.close()
@@ -403,7 +403,7 @@ def salib_morris_postprocess(project):
     plt.tight_layout()
 
     scatter_path = os.path.join(
-        out_dir, f"{project.setting.output}{suffix}_morris_mu_vs_sigma.png"
+        out_dir, f"{project.setting.output}_morris{suffix}_mu_vs_sigma.png"
     )
     plt.savefig(scatter_path, dpi=300)
     plt.close()

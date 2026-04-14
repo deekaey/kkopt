@@ -321,7 +321,7 @@ class spot_setup(object):
                 print_to_console=True
             )
             suffix = self._rep_suffix()
-            out_base = f"{self._setting.output}{suffix}_sobol"
+            out_base = f"{self._setting.output}_sobol{suffix}"
             np.savetxt(
                 out_base + "_S1.csv",
                 np.vstack([problem['names'], Si['S1']]).T,
@@ -356,7 +356,7 @@ class spot_setup(object):
                 print_to_console=True
             )
             suffix = self._rep_suffix()
-            out_base = f"{self._setting.output}{suffix}_morris"
+            out_base = f"{self._setting.output}_morris{suffix}"
             arr = np.vstack([
                 problem['names'],
                 Si['mu_star'],
