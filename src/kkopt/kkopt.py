@@ -79,6 +79,16 @@ class spot_setup(object):
                                                           v['initialvalue'],
                                                           v['step']))
 
+    def _rep_suffix(self) -> str:
+        reps = getattr(self._setting, "repetitions", None)
+        if reps is None:
+            return ""
+        try:
+            n = int(reps)
+        except Exception:
+            return ""
+        return f"_N{n}"
+
     def _get_local_indices( self, n_global: int):
         """Return indices of the global array that this MPI rank should handle."""
         if not self.parallel or self.size == 1:
@@ -310,7 +320,8 @@ class spot_setup(object):
                 Y,
                 print_to_console=True
             )
-            out_base = f"{self._setting.output}_sobol"
+            suffix = self._rep_suffix()
+            out_base = f"{self._setting.output}{suffix}_sobol"
             np.savetxt(
                 out_base + "_S1.csv",
                 np.vstack([problem['names'], Si['S1']]).T,
@@ -344,7 +355,8 @@ class spot_setup(object):
                 Y,
                 print_to_console=True
             )
-            out_base = f"{self._setting.output}_morris"
+            suffix = self._rep_suffix()
+            out_base = f"{self._setting.output}{suffix}_morris"
             arr = np.vstack([
                 problem['names'],
                 Si['mu_star'],

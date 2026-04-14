@@ -9,6 +9,21 @@ import seaborn as sns
 import spotpy
 
 
+def _rep_suffix(project) -> str:
+    """
+    Return a suffix encoding the number of repetitions, e.g. '_N6000'.
+    Falls back to empty string if repetitions is missing.
+    """
+    reps = getattr(project.setting, "repetitions", None)
+    if reps is None:
+        return ""
+    try:
+        n = int(reps)
+    except Exception:
+        return ""
+    return f"_N{n}"
+
+
 def postprocess(project):
     """
     Dispatch to the appropriate postprocessing depending on the method.
@@ -104,9 +119,10 @@ def spotpy_postprocess(project):
             f"Parameterverteilungen (Top {int(percentile_threshold * 100)}%)",
             y=1.02,
         )
+        suffix = _rep_suffix(project)
         param_plot_path = os.path.join(
             project.output_dir,
-            f"{project.setting.output}_parameters_{like_type}.png",
+            f"{project.setting.output}{suffix}_parameters_{like_type}.png",
         )
         plt.savefig(param_plot_path, dpi=300)
         plt.close()
@@ -182,9 +198,10 @@ def spotpy_postprocess(project):
             cell.set_width(0.5)
             cell.set_text_props(ha="left", va="center")
 
+    suffix = _rep_suffix(project)
     scatter_plot_path = os.path.join(
         project.output_dir,
-        f"{project.setting.output}_opt_{like_type}_with_table.png",
+        f"{project.setting.output}{suffix}_opt_{like_type}_with_table.png",
     )
     plt.tight_layout()
     plt.savefig(scatter_plot_path, dpi=300)
@@ -203,7 +220,8 @@ def salib_sobol_postprocess(project):
       <output>_sobol_ST.csv
       <output>_sobol_S2.csv
     """
-    base = project.setting.output + "_sobol"
+    suffix = _rep_suffix(project)
+    base = project.setting.output + "_sobol" + suffix
     out_dir = project.output_dir
     os.makedirs(out_dir, exist_ok=True)
 
@@ -250,7 +268,9 @@ def salib_sobol_postprocess(project):
     plt.legend()
     plt.tight_layout()
 
-    bar_plot_path = os.path.join(out_dir, f"{project.setting.output}_sobol_S1_ST.png")
+    bar_plot_path = os.path.join(
+        out_dir, f"{project.setting.output}{suffix}_sobol_S1_ST.png"
+    )
     plt.savefig(bar_plot_path, dpi=300)
     plt.close()
 
@@ -307,7 +327,7 @@ def salib_sobol_postprocess(project):
 
         plt.tight_layout()
         heatmap_path = os.path.join(
-            out_dir, f"{project.setting.output}_sobol_S2.png"
+            out_dir, f"{project.setting.output}{suffix}_sobol_S2.png"
         )
         plt.savefig(heatmap_path, dpi=300)
         plt.close()
@@ -326,7 +346,8 @@ def salib_morris_postprocess(project):
       <output>_morris_indices.csv
     with columns: name, mu_star, sigma, mu
     """
-    base = project.setting.output + "_morris"
+    suffix = _rep_suffix(project)
+    base = project.setting.output + "_morris" + suffix
     out_dir = project.output_dir
     os.makedirs(out_dir, exist_ok=True)
 
@@ -364,7 +385,9 @@ def salib_morris_postprocess(project):
     plt.legend()
     plt.tight_layout()
 
-    bar_path = os.path.join(out_dir, f"{project.setting.output}_morris_mu_sigma_bar.png")
+    bar_path = os.path.join(
+        out_dir, f"{project.setting.output}{suffix}_morris_mu_sigma_bar.png"
+    )
     plt.savefig(bar_path, dpi=300)
     plt.close()
 
@@ -379,6 +402,8 @@ def salib_morris_postprocess(project):
     plt.title("Morris: mu* vs sigma")
     plt.tight_layout()
 
-    scatter_path = os.path.join(out_dir, f"{project.setting.output}_morris_mu_vs_sigma.png")
+    scatter_path = os.path.join(
+        out_dir, f"{project.setting.output}{suffix}_morris_mu_vs_sigma.png"
+    )
     plt.savefig(scatter_path, dpi=300)
     plt.close()
