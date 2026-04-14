@@ -2,7 +2,9 @@
 import os
 from os.path import exists
 import re
+import shutil
 import subprocess
+import time
 
 from dotenv import load_dotenv
 import numpy as np
@@ -18,6 +20,8 @@ except ImportError:
 
 from kkplot.kkutils.expand import kkexpand
 from kkplot.kkutils.log import kklog_debug, kklog_info, kklog_warn
+from kkplot.kksources import kkplot_sourcefactory as kkplot_sourcefactory
+from kkplot.kkplot_dviplot import *
 from kkplot.kkplot_figure import DSSEP
 
 import kkopt.kkutils as utils
@@ -25,12 +29,16 @@ from kkopt.kkopt_project import kkopt_project
 from kkopt.kkopt_postprocess import postprocess
 
 class spot_setup(object):
-    def __init__(self, _config, _project):
+    def __init__( self, _config, _project):
 
         self._configuration = _config
-        ##get all settings 
         self._setting = _project.setting
         self._parallel = _project.parallel
+
+        # MPI handles (None if not parallel)
+        self.comm = MPI.COMM_WORLD if self.parallel else None
+        self.rank = self.comm.Get_rank() if self.parallel else 0
+        self.size = self.comm.Get_size() if self.parallel else 1
 
         #self._calibrations = _project.calibrations
         self.likes = []
@@ -71,6 +79,76 @@ class spot_setup(object):
                                                           v['initialvalue'],
                                                           v['step']))
 
+    def _get_local_indices( self, n_global: int):
+        """Return indices of the global array that this MPI rank should handle."""
+        if not self.parallel or self.size == 1:
+            return np.arange(n_global)
+
+        base = n_global // self.size
+        rest = n_global % self.size
+
+        if self.rank < rest:
+            start = self.rank * (base + 1)
+            stop = start + base + 1
+        else:
+            start = rest * (base + 1) + (self.rank - rest) * base
+            stop = start + base
+
+        return np.arange(start, stop, dtype=int)
+
+    def _rank_specific_path(self, base_path: str) -> str:
+        """
+        Given a base file path, build and return a rank-specific variant if in parallel.
+
+        For example, with base:
+          .../VN_anlam_soilchemistry-daily.txt
+
+        and rank=1, this method will try (in order):
+          VN_anlam_r1soilchemistry-daily.txt     (insert after first "_")
+          VN_anlam_soilchemistry-r1daily.txt     (insert after second "_")
+          ...
+
+        At each "_" position in the filename, an "_r<rank>" is inserted and
+        the existence of the resulting file is checked. The first existing
+        file is returned. If none exist, the original base path is returned.
+        """
+        base_path = os.path.expandvars(base_path)
+
+        if not self.parallel:
+            return base_path
+
+        rank = MPI.COMM_WORLD.Get_rank() + 1
+
+        dir_name, fname = os.path.split(base_path)
+
+        # Positions of underscores in the filename
+        underscore_positions = [i for i, ch in enumerate(fname) if ch == "_"]
+
+        # Try inserting "_r<rank>" after each underscore
+        for pos in underscore_positions:
+            # Split around this underscore
+            before = fname[: pos + 1]   # include the underscore
+            after = fname[pos + 1 :]
+            rank_fname = f"{before}r{rank}{after}"
+            rank_path = os.path.join(dir_name, rank_fname)
+
+            if os.path.exists(rank_path):
+                return rank_path
+
+        # Optionally: also try a simple prefix (no underscores present or none matched)
+        if not underscore_positions:
+            rank_fname = f"r{rank}_{fname}"
+            rank_path = os.path.join(dir_name, rank_fname)
+            if os.path.exists(rank_path):
+                return rank_path
+
+        # If no rank-specific file exists, fall back to base
+        kklog_debug(
+            f"[get_data] No rank-specific file found, using base file instead:\n"
+            f"  rank={rank}\n  base: {base_path}"
+        )
+        return base_path
+
     def build_salib_problem( self):
         """
         Build SALib 'problem' dict from kkopt/spotpy parameter configuration.
@@ -93,7 +171,7 @@ class spot_setup(object):
         }
         return problem
 
-    def run_sensitivity( self, method='sobol', N=1000, output_metric='rmse'):
+    def run_sensitivity(self, method='sobol', N=1000, output_metric='rmse'):
         """
         Run global sensitivity analysis using SALib.
 
@@ -102,74 +180,162 @@ class spot_setup(object):
         method : str
             'sobol' or 'morris'.
         N : int
-            Base sample size for SALib.
+            Target total number of model evaluations (approximate).
         output_metric : str
             'rmse' or 'mean' – how to reduce the time series to one value per run.
         """
         problem = self.build_salib_problem()
-        n_pars = problem['num_vars']
+        D = problem['num_vars']  # number of parameters
+        N_total = int(N)
 
         # 1) Generate samples
         if method == 'sobol':
-            param_values = saltelli.sample( problem, N, calc_second_order=True)
+            # N_total ≈ N_base * (2D + 2) => choose N_base accordingly
+            denom = 2 * D + 2
+            if denom <= 0:
+                raise ValueError(f"Invalid number of parameters D={D} for Sobol")
+            N_base = max(1, N_total // denom)
+            if self.rank == 0:
+                print(
+                    f"[SALib/Sobol] target N_total={N_total}, "
+                    f"D={D} -> N_base={N_base}, "
+                    f"expected runs ≈ {N_base * denom}"
+                )
+            param_values = saltelli.sample(
+                problem, N_base, calc_second_order=True
+            )
+
         elif method == 'morris':
-            # k is number of trajectories, p is grid levels
-            k = N
-            param_values = morris_sample.sample( problem, N=k, num_levels=4, optimal_trajectories=None)
+            # N_total ≈ k * (D + 1) => choose k accordingly
+            denom = D + 1
+            if denom <= 0:
+                raise ValueError(f"Invalid number of parameters D={D} for Morris")
+            k = max(1, N_total // denom)
+            if self.rank == 0:
+                print(
+                    f"[SALib/Morris] target N_total={N_total}, "
+                    f"D={D} -> k={k}, "
+                    f"expected runs ≈ {k * denom}"
+                )
+            param_values = morris_sample.sample(
+                problem, N=k, num_levels=4, optimal_trajectories=None
+            )
+
         else:
             raise ValueError(f"Unknown SALib method: {method}")
 
         n_runs = param_values.shape[0]
-        print(f"SALib: generated {n_runs} samples for method={method}")
+        if self.rank == 0:
+            print(
+                f"SALib: generated {n_runs} samples for method={method} "
+                f"(target N_total={N_total})"
+            )
 
-        # 2) Evaluate model for each sample
-        Y = np.zeros( n_runs)
+        if self.parallel:
+            # broadcast n_runs
+            n_runs = self.comm.bcast(n_runs, root=0)
+        else:
+            # serial case: n_runs already set
+            pass
 
-        for i in range( n_runs):
-            pars = param_values[i, :]
-            # Update Lresources with current parameters
+        # 2) scatter parameters to ranks
+        if self.parallel:
+            # split indices among ranks
+            local_idx = self._get_local_indices(n_runs)
+            # broadcast full param_values for simplicity (if memory allows),
+            # or scatter rows if you want to optimize memory.
+            if self.rank == 0:
+                # broadcast full matrix
+                self.comm.bcast(param_values, root=0)
+            else:
+                param_values = self.comm.bcast(None, root=0)
+            # local slice
+            local_param_values = param_values[local_idx, :]
+        else:
+            local_idx = np.arange(n_runs)
+            local_param_values = param_values
+
+        # 3) Evaluate model for each local sample
+        local_Y = np.zeros(local_param_values.shape[0])
+
+        for ii, i_global in enumerate(local_idx):
+            pars = local_param_values[ii, :]
             self.update_parameters( pars)
-            # Run model and read simulation
             self.simulation()
+            local_Y[ii] = self.objectivefunction(self._simulation, self._evaluation)
+            if (ii + 1) % 10 == 0 or ii == len(local_idx) - 1:
+                print(
+                    f"SALib (rank {self.rank}): "
+                    f"finished {ii+1}/{len(local_idx)} local runs "
+                    f"(global up to {i_global+1}/{n_runs})"
+                )
 
-            Y[i] = self.objectivefunction( self._simulation, self._evaluation)
+        # 4) Gather Y back to rank 0
+        if self.parallel:
+            # gather lengths first
+            local_len = np.array(len(local_Y), dtype=int)
+            recv_counts = None
+            if self.rank == 0:
+                recv_counts = np.empty(self.size, dtype=int)
+            self.comm.Gather(local_len, recv_counts, root=0)
 
-            if (i + 1) % 10 == 0 or i == n_runs - 1:
-                print(f"SALib: finished {i+1}/{n_runs} runs")
+            # gather data
+            if self.rank == 0:
+                Y = np.empty(n_runs, dtype=float)
+                displs = np.insert(np.cumsum(recv_counts[:-1]), 0, 0)
+            else:
+                Y = None
+                displs = None
+                recv_counts = None
 
-        # 3) Remove NaNs if any runs failed
+            self.comm.Gatherv(local_Y, (Y, recv_counts, displs, MPI.DOUBLE), root=0)
+        else:
+            Y = local_Y
+
+        # Only rank 0 does analysis and file writing
+        if self.parallel and self.rank != 0:
+            return
+
+        # 5) Remove NaNs if any runs failed
         valid_idx = ~np.isnan(Y)
         if not np.all(valid_idx):
             print(f"SALib: {np.sum(~valid_idx)} runs had NaN output, excluding them")
             param_values = param_values[valid_idx, :]
             Y = Y[valid_idx]
 
-        # 4) Analyze
+        # 6) Analyze
         if method == 'sobol':
             Si = sobol.analyze(
-                problem, Y,
+                problem,
+                Y,
                 print_to_console=True
             )
-            # Save Sobol indices
             out_base = f"{self._setting.output}_sobol"
-            np.savetxt(out_base + "_S1.csv",
-                       np.vstack([problem['names'], Si['S1']]).T,
-                       delimiter=",", fmt="%s")
-            np.savetxt(out_base + "_ST.csv",
-                       np.vstack([problem['names'], Si['ST']]).T,
-                       delimiter=",", fmt="%s")
+            np.savetxt(
+                out_base + "_S1.csv",
+                np.vstack([problem['names'], Si['S1']]).T,
+                delimiter=",",
+                fmt="%s",
+            )
+            np.savetxt(
+                out_base + "_ST.csv",
+                np.vstack([problem['names'], Si['ST']]).T,
+                delimiter=",",
+                fmt="%s",
+            )
             if 'S2' in Si:
-                # pairwise second-order
-                # flatten into table (i, j, S2_ij)
                 names = problem['names']
                 S2_list = []
                 for i in range(n_pars):
                     for j in range(i + 1, n_pars):
                         S2_list.append([names[i], names[j], Si['S2'][i, j]])
                 S2_arr = np.array(S2_list, dtype=object)
-                np.savetxt(out_base + "_S2.csv",
-                           S2_arr,
-                           delimiter=",", fmt="%s")
+                np.savetxt(
+                    out_base + "_S2.csv",
+                    S2_arr,
+                    delimiter=",",
+                    fmt="%s",
+                )
 
         elif method == 'morris':
             Si = morris_analyze.analyze(
@@ -179,20 +345,21 @@ class spot_setup(object):
                 print_to_console=True
             )
             out_base = f"{self._setting.output}_morris"
-            # mu*, sigma etc.
             arr = np.vstack([
                 problem['names'],
                 Si['mu_star'],
                 Si['sigma'],
-                Si['mu']
+                Si['mu'],
             ]).T
             header = "name,mu_star,sigma,mu"
-            np.savetxt(out_base + "_indices.csv",
-                       arr,
-                       delimiter=",",
-                       fmt="%s",
-                       header=header,
-                       comments="")
+            np.savetxt(
+                out_base + "_indices.csv",
+                arr,
+                delimiter=",",
+                fmt="%s",
+                header=header,
+                comments="",
+            )
         else:
             raise ValueError(f"Unknown SALib method: {method}")
 
@@ -213,47 +380,116 @@ class spot_setup(object):
     def get_data( self, _target, _index=None) :
 
         data_out = pd.DataFrame()
-        for i in range(len(self._setting.calibrations)):
-            if self._setting.calibrations[i][_target]['datasource'].has_provider:
-                self._setting.calibrations[i][_target]['datasource'].provider.execute()
-            datasource_name = self._setting.calibrations[i][_target]['datasource'].name
 
-            entity = self._setting.calibrations[i][_target]['entity']
+        calibrations = self._setting.calibrations
+
+        for i, calib in enumerate( calibrations):
+
+            # ------------------------------------------------------------------
+            # 1) Run provider if present
+            # ------------------------------------------------------------------
+            if calib[_target]['datasource'].has_provider:
+                calib[_target]['datasource'].provider.execute()
+            datasource_name = calib[_target]['datasource'].name
+
+            entity = calib[_target]['entity']
+            path = calib[_target]['datasource'].path
+
+            # ------------------------------------------------------------------
+            # 2) Resolve path for MPI / rank
+            # ------------------------------------------------------------------
             path = self._setting.calibrations[i][_target]['datasource'].path
-            if self.parallel:
-                path = path + str(MPI.COMM_WORLD.Get_rank()+1)
-                path = path.replace( "RANK", "r"+str(MPI.COMM_WORLD.Get_rank()+1))
-            else:
-                path = path.replace( "RANK", "r1")
-            data = pd.read_csv( path, header=0, na_values=['-99.99','na','nan'], comment='#', sep="\t")
-            data = self.canonicalize_headernames( data)
+            if self.parallel and _target == "simulation":
+                path = self._rank_specific_path(path)
 
-            if 'sampletime' in self._setting.calibrations[i]:
-                sampletime = self._setting.calibrations[i]['sampletime']
-                t_from, t_to = sampletime.split( '->')
+            if not os.path.exists(path):
+                print(
+                    f"[get_data] File not found for calibration index {i}, "
+                    f"target='{_target}': {path}"
+                )
+                sys.exit(255)
+
+            # ------------------------------------------------------------------
+            # 3) Read raw data
+            # ------------------------------------------------------------------
+            try:
+                data = pd.read_csv(
+                    path,
+                    header=0,
+                    na_values=["-99.99", "na", "nan"],
+                    comment="#",
+                    sep="\t",
+                )
+            except Exception as e:
+                print(
+                    f"[get_data] Error reading CSV for calibration index {i}, "
+                    f"target='{_target}'\n  path: {path}\n  error: {repr(e)}"
+                )
+                sys.exit(255)
+
+            data = self.canonicalize_headernames(data)
+
+            if "datetime" not in data.columns:
+                print(
+                    f"[get_data] 'datetime' column missing in file:\n  {path}\n"
+                    f"  columns: {list(data.columns)}"
+                )
+                sys.exit(255)
+
+            # ------------------------------------------------------------------
+            # 4) Time subsetting (sampletime)
+            # ------------------------------------------------------------------
+            if "sampletime" in calib:
+                sampletime = calib["sampletime"]
+                try:
+                    t_from, t_to = sampletime.split("->")
+                except ValueError:
+                    print(
+                        f"[get_data] Invalid sampletime format in calibration index {i}: "
+                        f"'{sampletime}', expected 'YYYY-MM-DD->YYYY-MM-DD'"
+                    )
+                    sys.exit(255)
                 eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
                 eval_data = eval_data.set_index('datetime')
                 eval_data.index = pd.to_datetime(eval_data.index)
             else:
                 eval_data = data
 
-            if 'filter' in self._setting.calibrations[i][_target]:
-                for f in self._setting.calibrations[i][_target]['filter']:
-
+            # ------------------------------------------------------------------
+            # 5) Optional filtering by columns
+            # ------------------------------------------------------------------
+            if 'filter' in calib[_target]:
+                for f in calib[_target]['filter']:
                     for k,v in f.items():
-
                         eval_data = eval_data.loc[eval_data[k].isin(v),]
+
+            # ------------------------------------------------------------------
+            # 6) Select the entity column
+            # ------------------------------------------------------------------
+            if entity not in eval_data.columns:
+                print(
+                    f"[get_data] Entity '{entity}' not in columns for calibration index {i}, "
+                    f"target='{_target}'.\n  path: {path}\n  columns: {list(eval_data.columns)}"
+                )
+                sys.exit(255)
             eval_data = eval_data[[entity]]
 
-
-            expression = self._setting.calibrations[i][_target]['expression']
+            # ------------------------------------------------------------------
+            # 7) Apply expression
+            # ------------------------------------------------------------------
+            expression = calib[_target]['expression']
             expression = expression.replace( entity+DSSEP+datasource_name, 'eval_data["%s"]' %entity)
             try:
                 eval_data = eval(expression).to_frame()
             except TypeError:
                 print( f"TypeError: {expression}\n{eval_data.head()}")
                 sys.exit( 255)
-            eval_data.rename(columns={entity: self._setting.calibrations[i]['id']}, inplace=True)
+
+            # ------------------------------------------------------------------
+            # 8) Rename column to calibration id and append
+            # ------------------------------------------------------------------
+            calib_id = calib["id"]
+            eval_data.rename(columns={entity: calib_id}, inplace=True)
             data_out = pd.concat([data_out, eval_data])
 
         if _index is not None:
@@ -306,98 +542,194 @@ class spot_setup(object):
         self.likes.append( np.append( L, L.mean()))
         return L.mean()
 
-    def run_simulation( self, _parallel = False) :
+    def run_simulation(self):
+        """
+        Run the external model(s) defined in self._setting.properties['model'].
 
-        models = [self._setting.properties['model']]
+        Returns
+        -------
+        rc : int
+            Aggregate return code (0 if all commands succeeded, >0 otherwise).
+        runtime : float
+            Wall-clock time in seconds.
+        """
+        model_cfg = self._setting.properties.get("model", None)
+        if model_cfg is None:
+            kklog_warn("No 'model' configuration found in settings; nothing to run")
+            return 0, 0.0
 
-        for model in models:
-            program = os.path.expandvars( model['binary'])
-            model_calls = []
-            for call in model['calls']:
+        program = os.path.expandvars(model_cfg["binary"])
+        calls = model_cfg.get("calls", [])
+        if not calls:
+            kklog_warn("Model configuration has no 'calls'; nothing to run")
+            return 0, 0.0
 
-                #argument = argument + os.path.expandvars( arg) + ' '
-                if False: #self.parallel:
-                    model_calls.append( program+" "+argument + str(MPI.COMM_WORLD.Get_rank()+1) + " > /dev/null 2>&1")
-                    kklog_debug( f'Rank {str(MPI.COMM_WORLD.Get_rank())}: %s' %str(model_calls[-1]))
-                else:
-                    model_calls.append( program+" "+os.path.expandvars( call) + " > /dev/null 2>&1")
+        # Build list of full commands
+        model_calls = []
+        for call in calls:
+            call_expanded = os.path.expandvars(call)
+
+            # handle rank-specific resources
+            if self.parallel:
+                rank = MPI.COMM_WORLD.Get_rank() + 1
+                call_expanded = call_expanded.replace("RANK", f"r{rank}")
+            else:
+                call_expanded = call_expanded.replace("RANK", "r1")
+
+            cmd = f"{program} {call_expanded} > /dev/null 2>&1"
+            model_calls.append(cmd)
+            kklog_debug(f"Model call: {cmd}")
+
         t0 = time.time()
-
-        # List to store subprocess objects
         processes = []
 
         # Start each command as a subprocess
-        for m in model_calls:
-            # Use shell=True to run the command through the shell
-            process = subprocess.Popen( m, shell=True)
+        for cmd in model_calls:
+            try:
+                # If you ever want to capture output, switch to subprocess.Popen([...], ...)
+                process = subprocess.Popen(cmd, shell=True)
+            except FileNotFoundError:
+                kklog_warn(f"Executable not found when running: {cmd}")
+                return 1, 0.0
+            except Exception as e:
+                kklog_warn(f"Error starting process '{cmd}': {repr(e)}")
+                return 1, 0.0
             processes.append(process)
 
         # Wait for all processes to complete
-        rcs = np.array([])
-        for process in processes:
-            rcs = np.append( rcs, process.wait())
+        return_codes = []
+        for p in processes:
+            rc = p.wait()
+            return_codes.append(rc)
 
         t1 = time.time()
+        runtime = round(t1 - t0, 2)
 
-        return (rcs.sum(), round( (t1-t0),2))
+        # Aggregate return codes
+        # if any command failed (rc != 0), we treat this as failure
+        max_rc = max(return_codes) if return_codes else 0
+        if max_rc != 0:
+            kklog_warn(
+                f"One or more model calls failed, return codes: {return_codes}"
+            )
+
+        return max_rc, runtime
 
     def update_parameters( self, _parameters=None):
 
         editor = self._setting.properties['model']['agent']
-        provider = editor['provider']
-        L_input = os.path.expandvars( editor['in'])
-        L_output = os.path.expandvars( editor['out'])
+        L_input = os.path.expandvars(editor['in'])
+        L_output = os.path.expandvars(editor['out'])
 
-        # open the source file and read it
-        subject = ''
-        #with open( kkexpand('${HOME}')+'/.ldndc/Lresources', 'r') as f:
-        with open( f"{L_input}/Lresources", 'r') as f:
+        # Handle rank-specific output path
+        if self.parallel:
+            rank = MPI.COMM_WORLD.Get_rank() + 1
+            L_output = L_output.replace("RANK", f"r{rank}")
+        else:
+            L_output = L_output.replace("RANK", "r1")
+
+        with open(f"{L_input}/Lresources", "r") as f:
             subject = f.read()
 
         if _parameters is not None:
             p_index = 0
+            for key, v in self._setting.parameters.items():
+                pname = v["name"]  # the name used inside Lresources
+                # pattern: whole line with ".<pname>." and an assignment
+                # (^...$ with MULTILINE ensures we only touch one line at a time)
+                pattern = re.compile(
+                    rf'^(.*\.{re.escape(pname)}\..*?)\s*=\s*".*?"\s*$',
+                    re.MULTILINE
+                )
+                match = pattern.search(subject)
 
-            for k,v in self._setting.parameters.items() :
-                search = re.search(r'.*\.%s\..*' % v['name'], subject)
-                #todo: add log warning
-                if search != None:
-                    pattern = re.compile(r'.*\.%s\..*' % v['name'])
-                    subject = pattern.sub('%s = "%f"' %(search.group(0).split('=')[0], _parameters[p_index]), subject)
+                if match is None:
+                    kklog_warn(
+                        f'Parameter "{pname}" not found in Lresources; '
+                        f'no replacement performed.'
+                    )
+                else:
+                    left_side = match.group(1)
+                    new_line = f'{left_side} = "{_parameters[p_index]:.6f}"'
+                    subject = pattern.sub(new_line, subject, count=1)
+
                 p_index += 1
 
-        # write the file
-        import shutil
-        if self.parallel:
-            L_output = f'{L_output}_{str(MPI.COMM_WORLD.Get_rank()+1)}'
-        #else:
-        #    L_output = os.path.expanduser(kkexpand('${HOME}')+f'/.ldndc/{L_output}')
-        if not os.path.exists( L_output):
-            os.makedirs( L_output)
-        if not os.path.exists( L_output+"/udunits2"):
-            shutil.copytree( L_input+"/udunits2", L_output+"/udunits2")
-        with open( f"{L_output}/Lresources", 'w') as f:
-            f.write( subject)
+        if not os.path.exists(L_output):
+            os.makedirs(L_output)
+
+        # copy udunits2 directory once
+        src_udunits = os.path.join(L_input, "udunits2")
+        dst_udunits = os.path.join(L_output, "udunits2")
+        if os.path.exists(src_udunits) and not os.path.exists(dst_udunits):
+            shutil.copytree(src_udunits, dst_udunits)
+
+        with open(f"{L_output}/Lresources", "w") as f:
+            f.write(subject)
 
     def simulation( self, _parameters=None) :
 
+        # 1) Update parameters file if new parameters are given
         if _parameters is not None:
-            self.update_parameters( _parameters)
+            self.update_parameters(_parameters)
 
-        kklog_debug('Model run %s' %str(self.simulation_counter+1))
+        # 2) Run the model
+        run_id = self.simulation_counter + 1
+        kklog_debug(f"Model run {run_id}")
         if self.parallel:
-            kklog_info('Rank %s' %str( MPI.COMM_WORLD.Get_rank()+2))
-        (rc,time) = self.run_simulation()
-        self.simulation_counter += 1
-        kklog_debug('Simulation duration %s s' %str(time))
+            kklog_info(f"Rank {MPI.COMM_WORLD.Get_rank() + 1}")
 
-        self._simulation = self.get_data( 'simulation', self._evaluation)
-        if None in self._simulation :
-            kklog_warn("loading of simulation data failed")
-            self._simulation = pd.DataFrame( np.nan, index=range(self._simulation.shape[0]), columns=self._simulation.columns)
-        elif rc > 0:
-            kklog_warn("model call not successful")
-            self._simulation = pd.DataFrame( np.nan, index=range(self._simulation.shape[0]), columns=self._simulation.columns)
-        return self._simulation['all'].squeeze().values
+        rc, runtime = self.run_simulation()
+        self.simulation_counter = run_id
+        kklog_debug(f"Simulation duration {runtime} s")
+
+        # 3) If model call clearly failed (non-zero return code), avoid reading data
+        if rc > 0:
+            kklog_warn(
+                f"Model call returned non-zero exit code (rc={rc}) "
+                "– filling simulation with NaNs"
+            )
+            # Build a NaN series with the same index as evaluation to keep shapes consistent
+            sim_nan = pd.Series(
+                np.nan, index=self._evaluation.index, name="all"
+            )
+            self._simulation = pd.DataFrame(sim_nan)
+            return self._simulation["all"].to_numpy()
+
+        # 4) Try to read simulation output
+        try:
+            sim = self.get_data("simulation", self._evaluation)
+        except SystemExit:
+            # get_data already printed an error; propagate
+            raise
+        except Exception as e:
+            kklog_warn(
+                f"Unexpected error while loading simulation data: {repr(e)} "
+                "– filling simulation with NaNs"
+            )
+            sim = pd.DataFrame(
+                np.nan,
+                index=self._evaluation.index,
+                columns=["all"],
+            )
+
+        # 5) Sanity check: non-empty, correct column
+        if not isinstance(sim, pd.DataFrame) or "all" not in sim.columns:
+            kklog_warn(
+                "Loaded simulation data has unexpected structure; "
+                "expected DataFrame with column 'all'. "
+                "Filling with NaNs."
+            )
+            sim = pd.DataFrame(
+                np.nan,
+                index=self._evaluation.index,
+                columns=["all"],
+            )
+
+        self._simulation = sim
+
+        # 6) Return 1D numpy array for SpotPy / SALib
+        return self._simulation["all"].to_numpy()
 
     def evaluation( self):
         return self._evaluation['all'].squeeze().values
@@ -412,59 +744,54 @@ class spot_setup(object):
         #    pass
 
 def main():
-
     comm = MPI.COMM_WORLD
-    if comm.Get_size() > 1:
-        parallel = True
-    else:
-        parallel = False
-    kkplot_env = kkexpand( '${HOME}')+'/.kkplot/kkplot.env'
-    if ( exists( kkplot_env)) :
-        load_dotenv( kkplot_env)
-    kkplot_env = kkexpand( '${HOME}')+'/.ldndc/kkplot.env'
-    if ( exists( kkplot_env)) :
-        load_dotenv( kkplot_env)
+    rank = comm.Get_rank()
+    parallel = comm.Get_size() > 1
 
-    ### Configuration object
+    kkplot_env = kkexpand('${HOME}') + '/.kkplot/kkplot.env'
+    if exists(kkplot_env):
+        load_dotenv(kkplot_env)
+    kkplot_env = kkexpand('${HOME}') + '/.ldndc/kkplot.env'
+    if exists(kkplot_env):
+        load_dotenv(kkplot_env)
+
     config = utils.configuration()
-
-    ### Calibration project
-    project = kkopt_project( config, _parallel = parallel)
+    project = kkopt_project(config, _parallel=parallel)
 
     if not config.nosim():
-        setup = spot_setup( config, project)
+        setup = spot_setup(config, project)
 
-        # calibration (spotpy)
-        if setup.method in ['mcmc', 'fast', 'lhs']:  # existing
-            lspotpy_functions = dict({
+        if setup.method in ['mcmc', 'fast', 'lhs']:
+            lspotpy_functions = {
                 'lhs': spotpy.algorithms.lhs,
                 'fast': spotpy.algorithms.fast,
-                'mcmc': spotpy.algorithms.mcmc
-            })
+                'mcmc': spotpy.algorithms.mcmc,
+            }
             if project.parallel:
                 sampler = lspotpy_functions[setup.method](
                     setup,
                     dbname=project.setting.output,
                     dbformat=project.setting.outputformat,
-                    parallel='mpi'
+                    parallel='mpi',
                 )
             else:
                 sampler = lspotpy_functions[setup.method](
                     setup,
                     dbname=project.setting.output,
-                    dbformat=project.setting.outputformat
+                    dbformat=project.setting.outputformat,
                 )
-            sampler.sample( setup.repetitions)
-            setup.finalize( sampler)
+            sampler.sample(setup.repetitions)
+            setup.finalize(sampler)
 
-        # sensitivity (SALib)
         elif setup.method in ['sobol', 'morris']:
-            setup.run_sensitivity( method=setup.method, N=setup.repetitions)
+            setup.run_sensitivity(method=setup.method, N=setup.repetitions)
         else:
             raise ValueError(f"Unknown method: {setup.method}")
 
-    postprocess(project)
+    # Only rank 0 runs postprocessing
+    if rank == 0:
+        postprocess(project)
 
-if __name__ == '__main__' :
 
+if __name__ == '__main__':
     main()

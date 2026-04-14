@@ -1,7 +1,7 @@
 # kkopt_postprocess.py
-
 import os
 import math
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,6 +15,7 @@ def postprocess(project):
 
     - SpotPy calibration methods ('mcmc', 'fast', 'lhs') → spotpy_postprocess
     - SALib Sobol ('sobol') → salib_sobol_postprocess
+    - SALib Morris ('morris') → salib_morris_postprocess
     """
     method = getattr(project.setting, "method", "").lower()
 
@@ -22,13 +23,14 @@ def postprocess(project):
         spotpy_postprocess(project)
     elif method == "sobol":
         salib_sobol_postprocess(project)
+    elif method == "morris":
+        salib_morris_postprocess(project)
     else:
-        # nothing or not implemented
         print(f"[postprocess] No postprocessing implemented for method='{method}'")
 
 
 # -------------------------------------------------------------------------
-# SpotPy calibration postprocessing (your existing logic, slightly cleaned)
+# SpotPy calibration postprocessing
 # -------------------------------------------------------------------------
 def spotpy_postprocess(project):
     base = pd.read_csv(f"{project.setting.output}_base.csv")
@@ -200,7 +202,6 @@ def salib_sobol_postprocess(project):
       <output>_sobol_S1.csv
       <output>_sobol_ST.csv
       <output>_sobol_S2.csv
-    in the current working directory.
     """
     base = project.setting.output + "_sobol"
     out_dir = project.output_dir
@@ -221,7 +222,6 @@ def salib_sobol_postprocess(project):
     df_S1 = pd.read_csv(S1_file, header=None, names=["name", "S1"])
     df_ST = pd.read_csv(ST_file, header=None, names=["name", "ST"])
 
-    # Merge and sort by total-order index
     df = df_S1.merge(df_ST, on="name")
     df["S1"] = df["S1"].astype(float)
     df["ST"] = df["ST"].astype(float)
@@ -258,13 +258,9 @@ def salib_sobol_postprocess(project):
     if os.path.exists(S2_file):
         df_S2 = pd.read_csv(S2_file, header=None, names=["i", "j", "S2"])
 
-        # Build list of all parameter names
         names_all = sorted(list(set(df_S2["i"]).union(set(df_S2["j"]))))
 
-        # Optional: shorten labels (e.g. keep last part after dot)
         def shorten(name: str) -> str:
-            # Example: "soilchem.ch4.k_methanogenesis" -> "k_methanogenesis"
-            # adjust to your naming convention
             if "." in name:
                 return name.split(".")[-1]
             return name
@@ -281,23 +277,18 @@ def salib_sobol_postprocess(project):
             mat[i, j] = val
             mat[j, i] = val  # symmetric
 
-        # Size scales with number of parameters, but with sensible bounds
         n = len(names_all)
         width = max(6, min(0.4 * n + 2, 16))
-        height = width  # square
+        height = width
 
         fig, ax = plt.subplots(figsize=(width, height))
-
-        # Draw heatmap
         im = ax.imshow(mat, cmap="viridis", interpolation="nearest")
 
-        # Ticks and labels
         ax.set_xticks(np.arange(n))
         ax.set_yticks(np.arange(n))
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
 
-        # Rotate x tick labels for readability
         plt.setp(
             ax.get_xticklabels(),
             rotation=45,
@@ -310,14 +301,11 @@ def salib_sobol_postprocess(project):
 
         ax.set_title("Sobol S2 interaction indices", pad=20)
 
-        # Colorbar with label
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.ax.set_ylabel("S2", rotation=90)
         cbar.ax.tick_params(labelsize=8)
 
-        # Tight layout to keep labels visible
         plt.tight_layout()
-
         heatmap_path = os.path.join(
             out_dir, f"{project.setting.output}_sobol_S2.png"
         )
@@ -325,3 +313,72 @@ def salib_sobol_postprocess(project):
         plt.close()
     else:
         print(f"[salib_sobol_postprocess] {S2_file} not found. No S2 heatmap created.")
+
+
+# -------------------------------------------------------------------------
+# SALib / Morris postprocessing
+# -------------------------------------------------------------------------
+def salib_morris_postprocess(project):
+    """
+    Postprocess Morris sensitivity results created by run_sensitivity(method='morris').
+
+    Expects file:
+      <output>_morris_indices.csv
+    with columns: name, mu_star, sigma, mu
+    """
+    base = project.setting.output + "_morris"
+    out_dir = project.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+
+    indices_file = base + "_indices.csv"
+    if not os.path.exists(indices_file):
+        print(
+            f"[salib_morris_postprocess] Morris indices file not found: "
+            f"{indices_file}. Skipping."
+        )
+        return
+
+    df = pd.read_csv(indices_file)
+    # ensure numeric
+    for col in ["mu_star", "sigma", "mu"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # sort by mu_star descending
+    df_sorted = df.sort_values(by="mu_star", ascending=False)
+
+    names = df_sorted["name"].values
+    mu_star = df_sorted["mu_star"].values
+    sigma = df_sorted["sigma"].values
+
+    # --- Bar plot for mu* and sigma ---
+    x = np.arange(len(names))
+    width = 0.35
+
+    plt.figure(figsize=(0.6 * len(names) + 2, 5))
+    plt.bar(x - width / 2, mu_star, width, label="mu* (importance)")
+    plt.bar(x + width / 2, sigma, width, label="sigma (nonlinearity/interactions)")
+
+    plt.xticks(x, names, rotation=45, ha="right")
+    plt.ylabel("Morris indices")
+    plt.title("Morris sensitivity (mu* and sigma)")
+    plt.legend()
+    plt.tight_layout()
+
+    bar_path = os.path.join(out_dir, f"{project.setting.output}_morris_mu_sigma_bar.png")
+    plt.savefig(bar_path, dpi=300)
+    plt.close()
+
+    # --- Scatter plot mu* vs sigma ---
+    plt.figure(figsize=(6, 5))
+    plt.scatter(mu_star, sigma, c="C0")
+    for n, x_val, y_val in zip(names, mu_star, sigma):
+        plt.text(x_val, y_val, n, fontsize=8, ha="left", va="bottom")
+
+    plt.xlabel("mu* (mean absolute elementary effect)")
+    plt.ylabel("sigma (standard deviation)")
+    plt.title("Morris: mu* vs sigma")
+    plt.tight_layout()
+
+    scatter_path = os.path.join(out_dir, f"{project.setting.output}_morris_mu_vs_sigma.png")
+    plt.savefig(scatter_path, dpi=300)
+    plt.close()
