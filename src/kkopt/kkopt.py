@@ -179,6 +179,10 @@ class spot_setup(object):
             'names': names,
             'bounds': bounds
         }
+        #print("SALib problem:")
+        #for n, b in zip(problem["names"], problem["bounds"]):
+        #    print(f"  {n}: [{b[0]}, {b[1]}]")
+
         return problem
 
     def run_sensitivity(self, method='sobol', N=1000, output_metric='rmse'):
@@ -195,6 +199,7 @@ class spot_setup(object):
             'rmse' or 'mean' – how to reduce the time series to one value per run.
         """
         problem = self.build_salib_problem()
+
         D = problem['num_vars']  # number of parameters
         N_total = int(N)
 
@@ -230,6 +235,7 @@ class spot_setup(object):
             param_values = morris_sample.sample(
                 problem, N=k, num_levels=4, optimal_trajectories=None
             )
+
 
         else:
             raise ValueError(f"Unknown SALib method: {method}")
@@ -633,8 +639,7 @@ class spot_setup(object):
 
         return max_rc, runtime
 
-    def update_parameters( self, _parameters=None):
-
+    def update_parameters(self, _parameters=None):
         editor = self._setting.properties['model']['agent']
         L_input = os.path.expandvars(editor['in'])
         L_output = os.path.expandvars(editor['out'])
@@ -653,8 +658,7 @@ class spot_setup(object):
             p_index = 0
             for key, v in self._setting.parameters.items():
                 pname = v["name"]  # the name used inside Lresources
-                # pattern: whole line with ".<pname>." and an assignment
-                # (^...$ with MULTILINE ensures we only touch one line at a time)
+
                 pattern = re.compile(
                     rf'^(.*\.{re.escape(pname)}\..*?)\s*=\s*".*?"\s*$',
                     re.MULTILINE
@@ -668,10 +672,13 @@ class spot_setup(object):
                     )
                 else:
                     left_side = match.group(1)
-                    new_line = f'{left_side} = "{_parameters[p_index]:.6f}"'
+                    val = _parameters[p_index]
+                    # high precision, scientific or fixed as needed
+                    new_line = f'{left_side} = "{val:.15g}"'
                     subject = pattern.sub(new_line, subject, count=1)
 
                 p_index += 1
+
 
         if not os.path.exists(L_output):
             os.makedirs(L_output)
