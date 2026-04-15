@@ -14,7 +14,38 @@ kkplot_defines = kkplot_namedconstants( KKCONSTS)
 kkplot_functions = kkplot_namedfunctions( KKFUNCS)
 
 
+def auto_cast(value):
+    """
+    Recursively:
+      - if value is a dict: apply auto_cast to all its values
+      - if value is a list/tuple: apply auto_cast to all its items
+      - if value is a string: try to convert to int or float
+      - otherwise: return as is
+    """
+    # Dict -> recurse into values
+    if isinstance(value, dict):
+        return {k: auto_cast(v) for k, v in value.items()}
 
+    # List / tuple -> recurse into elements
+    if isinstance(value, (list, tuple)):
+        return type(value)(auto_cast(v) for v in value)
+
+    # Non-string scalar -> return as is
+    if not isinstance(value, str):
+        return value
+
+    # Try int (only if it is a "clean" integer representation)
+    if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+        try:
+            return int(value)
+        except ValueError:
+            pass  # fall through to float
+
+    # Try float
+    try:
+        return float(value)
+    except ValueError:
+        return value  # keep as string
 
 class kkopt_setting( object) :
     def __init__( self) :
@@ -35,16 +66,18 @@ class kkopt_setting( object) :
         content = yaml.load( pf_stream, Loader=yaml.FullLoader)
 
         self._parameters = dict()
-        for k1,v1 in content['parameters'].items():
+        for k1, v1 in content['parameters'].items():
+            #v1 is a single parameter block
+            if isinstance(v1, dict) and 'name' in v1 and 'distribution' in v1:
+                # kompletten Block auto_casten und unter k1 ablegen
+                self._parameters[k1] = auto_cast(v1)
 
-            if 'name' in v1 and 'distribution' in v1:
-                self._parameters.update( {k1: {}})
-                for k2,v2 in v1.items():
-                    self._parameters[k1].update( {k2: v2})
+            #v1 is a group of parameters
             else:
-                if k1 == _use:
-                    for k2,v2 in v1.items():
-                        self._parameters.update( {k2: v2})
+                if k1 == _use and isinstance(v1, dict):
+                    for k2, v2 in v1.items():
+                        # v2 kann selbst ein Dict sein -> auto_cast kümmert sich darum
+                        self._parameters[k2] = auto_cast(v2)
 
     def add_parameter( self, _parameters) :
         self._parameters.update( _parameters)
