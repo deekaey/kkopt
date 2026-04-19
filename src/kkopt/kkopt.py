@@ -63,7 +63,6 @@ class spot_setup(object):
         output_path = f"{self._setting.output}_base.csv"
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         df_tmp.to_csv( output_path)
-        #df_tmp.to_csv( f"{self._setting.output}_base.csv")
 
         self._simulation_default = self._simulation
         self.objectivefunction( self._simulation, self._evaluation)
@@ -127,7 +126,7 @@ class spot_setup(object):
         if not self.parallel:
             return base_path
 
-        rank = MPI.COMM_WORLD.Get_rank() + 1
+        rank = self.rank + 1
 
         dir_name, fname = os.path.split(base_path)
 
@@ -179,9 +178,6 @@ class spot_setup(object):
             'names': names,
             'bounds': bounds
         }
-        #print("SALib problem:")
-        #for n, b in zip(problem["names"], problem["bounds"]):
-        #    print(f"  {n}: [{b[0]}, {b[1]}]")
 
         return problem
 
@@ -199,13 +195,12 @@ class spot_setup(object):
             'rmse' or 'mean' – how to reduce the time series to one value per run.
         """
         problem = self.build_salib_problem()
-
         D = problem['num_vars']  # number of parameters
         N_total = int(N)
 
         # 1) Generate samples
         if method == 'sobol':
-            # N_total ≈ N_base * (2D + 2) => choose N_base accordingly
+            # N_total ≈ N_base * (2D + 2)
             denom = 2 * D + 2
             if denom <= 0:
                 raise ValueError(f"Invalid number of parameters D={D} for Sobol")
@@ -216,170 +211,156 @@ class spot_setup(object):
                     f"D={D} -> N_base={N_base}, "
                     f"expected runs ≈ {N_base * denom}"
                 )
-            param_values = saltelli.sample(
-                problem, N_base, calc_second_order=True
-            )
+            param_values = saltelli.sample(problem, N_base, calc_second_order=True)
 
         elif method == 'morris':
-            # N_total ≈ k * (D + 1) => choose k accordingly
+            # N_total ≈ k * (D + 1)
             denom = D + 1
             if denom <= 0:
                 raise ValueError(f"Invalid number of parameters D={D} for Morris")
             k = max(1, N_total // denom)
             if self.rank == 0:
-                print(
+                kklog_info(
                     f"[SALib/Morris] target N_total={N_total}, "
                     f"D={D} -> k={k}, "
                     f"expected runs ≈ {k * denom}"
                 )
-            param_values = morris_sample.sample(
-                problem, N=k, num_levels=4, optimal_trajectories=None
-            )
-
-
+            param_values = morris_sample.sample( problem, N=k, num_levels=4, optimal_trajectories=None)
         else:
             raise ValueError(f"Unknown SALib method: {method}")
 
         n_runs = param_values.shape[0]
         if self.rank == 0:
-            print(
+            kklog_info(
                 f"SALib: generated {n_runs} samples for method={method} "
                 f"(target N_total={N_total})"
             )
 
         if self.parallel:
-            # broadcast n_runs
-            n_runs = self.comm.bcast(n_runs, root=0)
-        else:
-            # serial case: n_runs already set
-            pass
+            n_runs = self.comm.bcast( n_runs, root=0)
 
-        # 2) scatter parameters to ranks
+        # 2) Distribute parameters to ranks
         if self.parallel:
-            # split indices among ranks
             local_idx = self._get_local_indices(n_runs)
-            # broadcast full param_values for simplicity (if memory allows),
-            # or scatter rows if you want to optimize memory.
             if self.rank == 0:
-                # broadcast full matrix
-                self.comm.bcast(param_values, root=0)
+                self.comm.bcast( param_values, root=0)
             else:
                 param_values = self.comm.bcast(None, root=0)
-            # local slice
             local_param_values = param_values[local_idx, :]
         else:
             local_idx = np.arange(n_runs)
             local_param_values = param_values
 
-        # 3) Evaluate model for each local sample
+        # 3) Evaluate model for each local sample, write local Y to files
         local_Y = np.zeros(local_param_values.shape[0])
 
-        for ii, i_global in enumerate(local_idx):
-            pars = local_param_values[ii, :]
-            self.update_parameters( pars)
-            self.simulation()
-            local_Y[ii] = self.objectivefunction(self._simulation, self._evaluation)
-            if (ii + 1) % 10 == 0 or ii == len(local_idx) - 1:
-                print(
-                    f"SALib (rank {self.rank}): "
-                    f"finished {ii+1}/{len(local_idx)} local runs "
-                    f"(global up to {i_global+1}/{n_runs})"
-                )
+        suffix = self._rep_suffix()
+        y_local_file = f"{self._setting.output}_{method}{suffix}_Y_rank{self.rank}.csv"
 
-        # 4) Gather Y back to rank 0
-        if self.parallel:
-            # gather lengths first
-            local_len = np.array(len(local_Y), dtype=int)
-            recv_counts = None
-            if self.rank == 0:
-                recv_counts = np.empty(self.size, dtype=int)
-            self.comm.Gather(local_len, recv_counts, root=0)
+        with open(y_local_file, "w") as f_y:
+            f_y.write("global_idx,Y\n")
+            for ii, i_global in enumerate(local_idx):
+                pars = local_param_values[ii, :]
+                self.update_parameters(pars)
 
-            # gather data
-            if self.rank == 0:
-                Y = np.empty(n_runs, dtype=float)
-                displs = np.insert(np.cumsum(recv_counts[:-1]), 0, 0)
-            else:
-                Y = None
-                displs = None
-                recv_counts = None
+                sim_values = self.simulation()
 
-            self.comm.Gatherv(local_Y, (Y, recv_counts, displs, MPI.DOUBLE), root=0)
-        else:
-            Y = local_Y
+                # treat any NaN in simulation as fatal for this run
+                if np.any( np.isnan(sim_values)):
+                    msg = (
+                        f"[{method}] Simulation produced NaN on rank {self.rank} "
+                        f"for global index {int(i_global)}. "
+                        "Aborting sensitivity analysis."
+                    )
+                    kklog_warn( msg)
+                    if self.parallel:
+                        MPI.COMM_WORLD.Abort( 1)
+                    else:
+                        sys.exit(1)
 
-        # Only rank 0 does analysis and file writing
+                # Compute scalar metric
+                if output_metric == 'rmse':
+                    val = self.objectivefunction(self._simulation, self._evaluation)
+                elif output_metric == 'mean':
+                    val = np.nanmean(sim_values)
+                else:
+                    raise ValueError(f"Unknown output_metric: {output_metric}")
+
+                local_Y[ii] = val
+
+                # write (global_index, value) to rank-specific file
+                f_y.write(f"{int(i_global)},{local_Y[ii]:.15g}\n")
+
+                if (ii + 1) % 10 == 0 or ii == len(local_idx) - 1:
+                    print(
+                        f"SALib (rank {self.rank}): "
+                        f"finished {ii+1}/{len(local_idx)} local runs "
+                        f"(global up to {i_global+1}/{n_runs})"
+                    )
+
+        # 4) After all ranks are done: only rank 0 merges Y files and analyzes
         if self.parallel and self.rank != 0:
             return
 
-        # 5) Remove NaNs if any runs failed
-        valid_idx = ~np.isnan(Y)
-        if not np.all(valid_idx):
-            print(f"SALib: {np.sum(~valid_idx)} runs had NaN output, excluding them")
-            param_values = param_values[valid_idx, :]
-            Y = Y[valid_idx]
+        # Rank 0: merge rank Y files into one, sorted by global_idx
+        merged_y_file = f"{self._setting.output}_{method}{suffix}_Y.csv"
 
-        # 6) Analyze
-        if method == 'sobol':
-            Si = sobol.analyze(
-                problem,
-                Y,
-                print_to_console=True
-            )
-            suffix = self._rep_suffix()
-            out_base = f"{self._setting.output}_sobol{suffix}"
-            np.savetxt(
-                out_base + "_S1.csv",
-                np.vstack([problem['names'], Si['S1']]).T,
-                delimiter=",",
-                fmt="%s",
-            )
-            np.savetxt(
-                out_base + "_ST.csv",
-                np.vstack([problem['names'], Si['ST']]).T,
-                delimiter=",",
-                fmt="%s",
-            )
-            if 'S2' in Si:
-                names = problem['names']
-                S2_list = []
-                for i in range(n_pars):
-                    for j in range(i + 1, n_pars):
-                        S2_list.append([names[i], names[j], Si['S2'][i, j]])
-                S2_arr = np.array(S2_list, dtype=object)
-                np.savetxt(
-                    out_base + "_S2.csv",
-                    S2_arr,
-                    delimiter=",",
-                    fmt="%s",
+        Y = np.empty(n_runs, dtype=float)
+        Y[:] = np.nan
+
+        rank_files = [
+            f"{self._setting.output}_{method}{suffix}_Y_rank{r}.csv"
+            for r in range(self.size)
+        ]
+
+        for rf in rank_files:
+            if not os.path.exists(rf):
+                kklog_warn(f"[{method}] Expected local Y file missing: {rf}")
+                continue
+            try:
+                df_rf = pd.read_csv(rf)
+            except pd.errors.EmptyDataError:
+                kklog_warn(f"[{method}] Local Y file is empty and will be skipped: {rf}")
+                continue
+            except Exception as e:
+                kklog_warn(f"[{method}] Error reading local Y file '{rf}': {repr(e)}")
+                continue
+
+            if df_rf.empty:
+                kklog_warn(f"[{method}] Local Y file has no rows and will be skipped: {rf}")
+                continue
+
+            if not {"global_idx", "Y"}.issubset(df_rf.columns):
+                kklog_warn(
+                    f"[{method}] Local Y file missing required columns in '{rf}': "
+                    f"found columns {list(df_rf.columns)}"
                 )
+                continue
 
-        elif method == 'morris':
-            Si = morris_analyze.analyze(
-                problem,
-                param_values,
-                Y,
-                print_to_console=True
-            )
-            suffix = self._rep_suffix()
-            out_base = f"{self._setting.output}_morris{suffix}"
-            arr = np.vstack([
-                problem['names'],
-                Si['mu_star'],
-                Si['sigma'],
-                Si['mu'],
-            ]).T
-            header = "name,mu_star,sigma,mu"
-            np.savetxt(
-                out_base + "_indices.csv",
-                arr,
-                delimiter=",",
-                fmt="%s",
-                header=header,
-                comments="",
-            )
-        else:
-            raise ValueError(f"Unknown SALib method: {method}")
+            for _, row in df_rf.iterrows():
+                gi = int(row["global_idx"])
+                Y[gi] = float(row["Y"])
+
+        # Save merged Y to a single file, sorted by global_idx
+        df_y = pd.DataFrame({
+            "global_idx": np.arange(n_runs),
+            "Y": Y
+        })
+        df_y_sorted = df_y.sort_values(by="global_idx")
+        df_y_sorted.to_csv(merged_y_file, index=False)
+
+        param_file = f"{self._setting.output}_{method}{suffix}_params.npy"
+        if self.rank == 0:
+            np.save(param_file, param_values)
+
+        # Remove rank-specific files
+        for rf in rank_files:
+            if os.path.exists(rf):
+                try:
+                    os.remove(rf)
+                except Exception as e:
+                    kklog_warn(f"[{method}] Could not remove local Y file '{rf}': {repr(e)}")
+
 
     @property
     def parallel( self) :
@@ -589,7 +570,7 @@ class spot_setup(object):
 
             # handle rank-specific resources
             if self.parallel:
-                rank = MPI.COMM_WORLD.Get_rank() + 1
+                rank = self.rank + 1
                 call_expanded = call_expanded.replace("RANK", f"r{rank}")
             else:
                 call_expanded = call_expanded.replace("RANK", "r1")
@@ -646,7 +627,7 @@ class spot_setup(object):
 
         # Handle rank-specific output path
         if self.parallel:
-            rank = MPI.COMM_WORLD.Get_rank() + 1
+            rank = self.rank + 1
             L_output = L_output.replace("RANK", f"r{rank}")
         else:
             L_output = L_output.replace("RANK", "r1")
@@ -700,11 +681,14 @@ class spot_setup(object):
 
         # 2) Run the model
         run_id = self.simulation_counter + 1
-        kklog_debug(f"Model run {run_id}")
+
         if self.parallel:
-            kklog_info(f"Rank {MPI.COMM_WORLD.Get_rank() + 1}")
+            kklog_debug(f"Rank {self.rank + 1}")
+        else:
+            kklog_debug(f"Model run {run_id}")
 
         rc, runtime = self.run_simulation()
+        kklog_info(f"Rank {self.rank + 1}  rc={rc}, runtime={runtime}")
         self.simulation_counter = run_id
         kklog_debug(f"Simulation duration {runtime} s")
 
@@ -809,13 +793,15 @@ def main():
             setup.finalize(sampler)
 
         elif setup.method in ['sobol', 'morris']:
-            setup.run_sensitivity(method=setup.method, N=setup.repetitions)
+            setup.run_sensitivity( method=setup.method, N=setup.repetitions)
+            if project.parallel:
+                kklog_info( f"Rank {rank + 1} terminated successfully!")
         else:
             raise ValueError(f"Unknown method: {setup.method}")
 
     # Only rank 0 runs postprocessing
     if rank == 0:
-        postprocess(project)
+        postprocess( project)
 
 
 if __name__ == '__main__':
