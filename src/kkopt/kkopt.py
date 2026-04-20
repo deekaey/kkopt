@@ -206,7 +206,7 @@ class spot_setup(object):
                 raise ValueError(f"Invalid number of parameters D={D} for Sobol")
             N_base = max(1, N_total // denom)
             if self.rank == 0:
-                print(
+                kklog_info(
                     f"[SALib/Sobol] target N_total={N_total}, "
                     f"D={D} -> N_base={N_base}, "
                     f"expected runs ≈ {N_base * denom}"
@@ -242,6 +242,12 @@ class spot_setup(object):
         # 2) Distribute parameters to ranks
         if self.parallel:
             local_idx = self._get_local_indices(n_runs)
+            kklog_info(
+                f"[run_sensitivity] rank={self.rank}, "
+                f"local_idx len={len(local_idx)}, "
+                f"min={local_idx.min() if len(local_idx) else 'NA'}, "
+                f"max={local_idx.max() if len(local_idx) else 'NA'}"
+            )
             if self.rank == 0:
                 self.comm.bcast( param_values, root=0)
             else:
@@ -287,16 +293,23 @@ class spot_setup(object):
                     raise ValueError(f"Unknown output_metric: {output_metric}")
 
                 local_Y[ii] = val
+                kklog_debug(
+                    f"[run_sensitivity] rank={self.rank}, "
+                    f"gi={int(i_global)}, Y={val:.15g}"
+                )
 
                 # write (global_index, value) to rank-specific file
                 f_y.write(f"{int(i_global)},{local_Y[ii]:.15g}\n")
 
                 if (ii + 1) % 10 == 0 or ii == len(local_idx) - 1:
-                    print(
+                    kklog_info(
                         f"SALib (rank {self.rank}): "
                         f"finished {ii+1}/{len(local_idx)} local runs "
                         f"(global up to {i_global+1}/{n_runs})"
                     )
+
+        if self.parallel:
+            self.comm.Barrier()
 
         # 4) After all ranks are done: only rank 0 merges Y files and analyzes
         if self.parallel and self.rank != 0:
@@ -341,6 +354,13 @@ class spot_setup(object):
                 gi = int(row["global_idx"])
                 Y[gi] = float(row["Y"])
 
+        missing = np.where(np.isnan(Y))[0]
+        kklog_debug(
+            f"[merge_Y] rank={self.rank}, n_runs={n_runs}, "
+            f"missing_count={len(missing)}, "
+            f"first_missing={missing[:20]}"
+        )
+
         # Save merged Y to a single file, sorted by global_idx
         df_y = pd.DataFrame({
             "global_idx": np.arange(n_runs),
@@ -354,12 +374,12 @@ class spot_setup(object):
             np.save(param_file, param_values)
 
         # Remove rank-specific files
-        for rf in rank_files:
-            if os.path.exists(rf):
-                try:
-                    os.remove(rf)
-                except Exception as e:
-                    kklog_warn(f"[{method}] Could not remove local Y file '{rf}': {repr(e)}")
+        #for rf in rank_files:
+        #    if os.path.exists(rf):
+        #        try:
+        #            os.remove(rf)
+        #        except Exception as e:
+        #            kklog_warn(f"[{method}] Could not remove local Y file '{rf}': {repr(e)}")
 
 
     @property
@@ -402,7 +422,7 @@ class spot_setup(object):
                 path = self._rank_specific_path(path)
 
             if not os.path.exists(path):
-                print(
+                kklog_error(
                     f"[get_data] File not found for calibration index {i}, "
                     f"target='{_target}': {path}"
                 )
@@ -420,7 +440,7 @@ class spot_setup(object):
                     sep="\t",
                 )
             except Exception as e:
-                print(
+                kklog_error(
                     f"[get_data] Error reading CSV for calibration index {i}, "
                     f"target='{_target}'\n  path: {path}\n  error: {repr(e)}"
                 )
@@ -429,7 +449,7 @@ class spot_setup(object):
             data = self.canonicalize_headernames(data)
 
             if "datetime" not in data.columns:
-                print(
+                kklog_error(
                     f"[get_data] 'datetime' column missing in file:\n  {path}\n"
                     f"  columns: {list(data.columns)}"
                 )
@@ -466,7 +486,7 @@ class spot_setup(object):
             # 6) Select the entity column
             # ------------------------------------------------------------------
             if entity not in eval_data.columns:
-                print(
+                kklog_error(
                     f"[get_data] Entity '{entity}' not in columns for calibration index {i}, "
                     f"target='{_target}'.\n  path: {path}\n  columns: {list(eval_data.columns)}"
                 )
@@ -481,7 +501,7 @@ class spot_setup(object):
             try:
                 eval_data = eval(expression).to_frame()
             except TypeError:
-                print( f"TypeError: {expression}\n{eval_data.head()}")
+                kklog_error( f"TypeError: {expression}\n{eval_data.head()}")
                 sys.exit( 255)
 
             # ------------------------------------------------------------------
@@ -688,7 +708,7 @@ class spot_setup(object):
             kklog_debug(f"Model run {run_id}")
 
         rc, runtime = self.run_simulation()
-        kklog_info(f"Rank {self.rank + 1}  rc={rc}, runtime={runtime}")
+
         self.simulation_counter = run_id
         kklog_debug(f"Simulation duration {runtime} s")
 
@@ -736,6 +756,17 @@ class spot_setup(object):
             )
 
         self._simulation = sim
+        kklog_debug(f"Rank {self.rank + 1}  rc={rc}, runtime={runtime}, sim={self._simulation["all"].to_numpy().mean()}")
+        if np.any( np.isnan(self._simulation["all"])):
+            msg = (
+                f"Simulation produced NaN on rank {self.rank} "
+                "Aborting sensitivity analysis."
+            )
+            kklog_warn( msg)
+            if self.parallel:
+                MPI.COMM_WORLD.Abort( 1)
+            else:
+                sys.exit(1)
 
         # 6) Return 1D numpy array for SpotPy / SALib
         return self._simulation["all"].to_numpy()
