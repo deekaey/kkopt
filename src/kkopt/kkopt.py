@@ -51,7 +51,6 @@ class spot_setup(object):
         #utils.kklog.log_info('Start test simulation')
         self.update_parameters( None)
         self.run_simulation()
-        self.simulation_counter = 0
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
@@ -124,9 +123,9 @@ class spot_setup(object):
         base_path = os.path.expandvars(base_path)
 
         if not self.parallel:
-            return base_path
-
-        rank = self.rank + 1
+            rank = 1
+        else:
+            rank = self.rank + 1
 
         dir_name, fname = os.path.split(base_path)
 
@@ -153,7 +152,7 @@ class spot_setup(object):
 
         # If no rank-specific file exists, fall back to base
         kklog_debug(
-            f"[get_data] No rank-specific file found, using base file instead:\n"
+            f"No rank-specific file found, using base file instead:\n"
             f"  rank={rank}\n  base: {base_path}"
         )
         return base_path
@@ -418,12 +417,12 @@ class spot_setup(object):
             # 2) Resolve path for MPI / rank
             # ------------------------------------------------------------------
             path = self._setting.calibrations[i][_target]['datasource'].path
-            if self.parallel and _target == "simulation":
-                path = self._rank_specific_path(path)
+            if _target == "simulation":
+                path = self._rank_specific_path( path)
 
             if not os.path.exists(path):
                 kklog_error(
-                    f"[get_data] File not found for calibration index {i}, "
+                    f"File not found for calibration index {i}, "
                     f"target='{_target}': {path}"
                 )
                 sys.exit(255)
@@ -441,7 +440,7 @@ class spot_setup(object):
                 )
             except Exception as e:
                 kklog_error(
-                    f"[get_data] Error reading CSV for calibration index {i}, "
+                    f"Error reading CSV for calibration index {i}, "
                     f"target='{_target}'\n  path: {path}\n  error: {repr(e)}"
                 )
                 sys.exit(255)
@@ -450,7 +449,7 @@ class spot_setup(object):
 
             if "datetime" not in data.columns:
                 kklog_error(
-                    f"[get_data] 'datetime' column missing in file:\n  {path}\n"
+                    f"'datetime' column missing in file:\n  {path}\n"
                     f"  columns: {list(data.columns)}"
                 )
                 sys.exit(255)
@@ -463,8 +462,9 @@ class spot_setup(object):
                 try:
                     t_from, t_to = sampletime.split("->")
                 except ValueError:
-                    print(
-                        f"[get_data] Invalid sampletime format in calibration index {i}: "
+                    kklog_error(
+                        f"Invalid sampletime format in calibration index {i}: "
+                        f"Invalid sampletime format in calibration index {i}: "
                         f"'{sampletime}', expected 'YYYY-MM-DD->YYYY-MM-DD'"
                     )
                     sys.exit(255)
@@ -487,7 +487,7 @@ class spot_setup(object):
             # ------------------------------------------------------------------
             if entity not in eval_data.columns:
                 kklog_error(
-                    f"[get_data] Entity '{entity}' not in columns for calibration index {i}, "
+                    f"Entity '{entity}' not in columns for calibration index {i}, "
                     f"target='{_target}'.\n  path: {path}\n  columns: {list(eval_data.columns)}"
                 )
                 sys.exit(255)
@@ -561,7 +561,7 @@ class spot_setup(object):
         self.likes.append( np.append( L, L.mean()))
         return L.mean()
 
-    def run_simulation(self):
+    def run_simulation( self):
         """
         Run the external model(s) defined in self._setting.properties['model'].
 
@@ -652,35 +652,60 @@ class spot_setup(object):
         else:
             L_output = L_output.replace("RANK", "r1")
 
+        # read template Lresources
         with open(f"{L_input}/Lresources", "r") as f:
             subject = f.read()
 
         if _parameters is not None:
             p_index = 0
             for key, v in self._setting.parameters.items():
-                pname = v["name"]  # the name used inside Lresources
+                pname = v["name"]           # the base parameter name
+                target = v.get("target", "")  # 'siteparameter' or 'species'
+                species = v.get("species", None)
 
+                # Build the regex pattern depending on target:
+                if target.lower() in ("siteparameter", "siteparameters", "site"):
+                    # Example: site.parameter.METRX_MUEMAX_C_CH4_PROD.value = "..."
+                    # left side: site.parameter.<pname>.value
+                    left_pattern = rf"site\.parameter\.{re.escape(pname)}\.value"
+                elif target.lower() in ("speciesparameter", "speciesparameters", "species"):
+                    if species is None:
+                        kklog_warn(
+                            f'Parameter "{key}" target is "species" but no "species" id is given; '
+                            f'skipping.'
+                        )
+                        p_index += 1
+                        continue
+                    # Example: species.PERG.parameter.SOME_PARAMETER.value = "..."
+                    left_pattern = rf"species\.{re.escape(species)}\.parameter\.{re.escape(pname)}\.value"
+                else:
+                    kklog_warn(
+                        f'Parameter "{key}" has unknown target "{target}"; skipping.'
+                    )
+                    p_index += 1
+                    continue
+
+                # Full line pattern, capturing the left side up to the "="
                 pattern = re.compile(
-                    rf'^(.*\.{re.escape(pname)}\..*?)\s*=\s*".*?"\s*$',
+                    rf'^({left_pattern})\s*=\s*".*?"\s*$',
                     re.MULTILINE
                 )
                 match = pattern.search(subject)
 
                 if match is None:
                     kklog_warn(
-                        f'Parameter "{pname}" not found in Lresources; '
+                        f'Parameter "{key}" (target="{target}") not found in Lresources; '
                         f'no replacement performed.'
                     )
                 else:
                     left_side = match.group(1)
                     val = _parameters[p_index]
-                    # high precision, scientific or fixed as needed
                     new_line = f'{left_side} = "{val:.15g}"'
                     subject = pattern.sub(new_line, subject, count=1)
 
                 p_index += 1
 
-
+        # write updated Lresources
         if not os.path.exists(L_output):
             os.makedirs(L_output)
 
@@ -700,16 +725,7 @@ class spot_setup(object):
             self.update_parameters(_parameters)
 
         # 2) Run the model
-        run_id = self.simulation_counter + 1
-
-        if self.parallel:
-            kklog_debug(f"Rank {self.rank + 1}")
-        else:
-            kklog_debug(f"Model run {run_id}")
-
         rc, runtime = self.run_simulation()
-
-        self.simulation_counter = run_id
         kklog_debug(f"Simulation duration {runtime} s")
 
         # 3) If model call clearly failed (non-zero return code), avoid reading data
@@ -722,7 +738,8 @@ class spot_setup(object):
             sim_nan = pd.Series(
                 np.nan, index=self._evaluation.index, name="all"
             )
-            self._simulation = pd.DataFrame(sim_nan)
+            self._simulation = pd.DataFrame( sim_nan)
+            print( self._simulation)
             return self._simulation["all"].to_numpy()
 
         # 4) Try to read simulation output
@@ -756,7 +773,7 @@ class spot_setup(object):
             )
 
         self._simulation = sim
-        kklog_debug(f"Rank {self.rank + 1}  rc={rc}, runtime={runtime}, sim={self._simulation["all"].to_numpy().mean()}")
+        kklog_debug(f"Rank {self.rank + 1}  rc={rc}, runtime={runtime}, sim={self._simulation['all'].to_numpy().mean()}")
         if np.any( np.isnan(self._simulation["all"])):
             msg = (
                 f"Simulation produced NaN on rank {self.rank} "

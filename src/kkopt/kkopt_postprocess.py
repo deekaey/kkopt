@@ -9,6 +9,46 @@ import seaborn as sns
 import spotpy
 from SALib.analyze import sobol, morris as morris_analyze
 
+
+def plot_parameter_correlations(df_used, param_cols, project, method, like_type):
+    # Prepare DataFrame with cleaned parameter names
+    df_params = df_used[param_cols].copy()
+    clean_names = [
+        c[3:] if c.startswith("par") else c
+        for c in param_cols
+    ]
+    df_params.columns = clean_names
+
+    # Compute correlation matrix
+    corr = df_params.corr(method="pearson")
+
+    # Plot heatmap
+    plt.figure(figsize=(0.5 * len(clean_names) + 4, 0.5 * len(clean_names) + 4))
+    sns.heatmap(
+        corr,
+        xticklabels=clean_names,
+        yticklabels=clean_names,
+        cmap="coolwarm",
+        center=0.0,
+        vmin=-1.0,
+        vmax=1.0,
+        square=True,
+        cbar_kws={"label": "Pearson correlation"},
+    )
+    plt.xticks(rotation=45, ha="right")
+    plt.yticks(rotation=0)
+    plt.title("Parameter correlation (MCMC)")
+    plt.tight_layout()
+
+    suffix = _rep_suffix(project)
+    corr_plot_path = os.path.join(
+        project.output_dir,
+        f"{project.setting.output}{suffix}_parameters_corr_{method.lower()}.png",
+    )
+    plt.savefig(corr_plot_path, dpi=300)
+    plt.close()
+
+
 def _build_salib_problem_from_project(project):
     names = []
     bounds = []
@@ -229,7 +269,8 @@ def postprocess(project):
     method = getattr(project.setting, "method", "").lower()
 
     if method in ["mcmc", "fast", "lhs"]:
-        spotpy_postprocess(project)
+        spotpy_postprocess(project, method=method)
+
     elif method == "sobol":
         # if indices don't exist yet, compute them from Y
         suffix = _rep_suffix(project)
@@ -253,21 +294,22 @@ def postprocess(project):
 # -------------------------------------------------------------------------
 # SpotPy calibration postprocessing
 # -------------------------------------------------------------------------
-def spotpy_postprocess(project):
+def spotpy_postprocess(project, method="mcmc"):
     base = pd.read_csv(f"{project.setting.output}_base.csv")
     base = base.set_index(pd.to_datetime(base.datetime))
 
-    percentile_threshold = 0.2
     delimiter = ","
     observed_values = base["evaluation"]
     like_type = "RMSE"  # or 'R2'
 
-    df = pd.read_csv(project.output_file, delimiter=delimiter)
+    reps = getattr(project.setting, "repetitions", None)
+    df = pd.read_csv(f"{project.setting.output}_N{reps}.csv", delimiter=delimiter)
 
     like_col = "like1"
     param_cols = [col for col in df.columns if col.startswith("par")]
     sim_cols = [col for col in df.columns if col.startswith("simulation_")]
 
+    # Compute performance metric
     if like_type == "R2":
         df["R2"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rsquared(
@@ -276,20 +318,33 @@ def spotpy_postprocess(project):
             axis=1,
         )
         df_sorted = df.sort_values(by=like_col, ascending=False)
-        top_n = int(len(df_sorted) * percentile_threshold)
-        df_top = df_sorted.head(top_n)
     else:
         df["RMSE"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rmse(row.values, observed_values),
             axis=1,
         )
         df_sorted = df.sort_values(by="RMSE", ascending=True)
-        top_n = int(len(df_sorted) * percentile_threshold)
-        df_top = df_sorted.head(top_n)
+
+    # --- Choose subset depending on method ---
+    if method.lower() == "mcmc":
+        # MCMC: drop burn-in and use all remaining samples
+        burnin_frac = 0.5  # configurable if desired
+        burnin = int(len(df_sorted) * burnin_frac)
+        df_used = df_sorted.iloc[burnin:].reset_index(drop=True)
+        plot_parameter_correlations(df_used, param_cols, project, method, like_type)
+    else:
+        # LHS/FAST: use top X% best runs
+        percentile_threshold = 0.05
+        top_n = max(1, int(len(df_sorted) * percentile_threshold))
+        df_used = df_sorted.head(top_n)
+
+    if len(df_used) == 0:
+        print(f"[spotpy_postprocess] No usable samples found for method={method}.")
+        return
 
     os.makedirs(project.output_dir, exist_ok=True)
 
-    # === PARAMETER DISTRIBUTIONS (top X%) ===
+    # === PARAMETER DISTRIBUTIONS ===
     n_params = len(param_cols)
     if n_params > 0:
         cols_per_row = 5
@@ -297,48 +352,61 @@ def spotpy_postprocess(project):
         plt.figure(figsize=(cols_per_row * 3, n_rows * 3))
 
         for i, param in enumerate(param_cols):
-            plt.subplot(n_rows, cols_per_row, i + 1)
-            sns.histplot(df_top[param], kde=True)
-            # lines for the best 3 runs
-            for j in range(min(3, len(df_sorted))):
-                best_params = df_sorted.iloc[j]
-                plt.axvline(
-                    best_params[param],
-                    color="gold",
-                    linestyle="--",
-                    linewidth=1.5,
-                )
-            # initial value from configuration
-            pname = param[3:]  # 'parX' -> parameter name
-            if pname in project.setting.parameters:
-                init_val = project.setting.parameters[pname]["initialvalue"]
-                plt.axvline(
-                    init_val,
-                    color="black",
-                    linestyle="--",
-                    linewidth=1.5,
-                )
-            plt.title(param)
+            ax = plt.subplot(n_rows, cols_per_row, i + 1)
+            sns.histplot(df_used[param], kde=True, ax=ax)
 
-        plt.tight_layout()
-        plt.suptitle(
-            f"Parameterverteilungen (Top {int(percentile_threshold * 100)}%)",
-            y=1.02,
-        )
+            if False:
+                # LHS/FAST: show lines for the best 3 runs
+                # MCMC: optional, still meaningful to show best 3
+                for j in range(min(3, len(df_sorted))):
+                    best_params = df_sorted.iloc[j]
+                    ax.axvline(
+                        best_params[param],
+                        color="gold",
+                        linestyle="--",
+                        linewidth=1.5,
+                    )
+
+                # initial value from configuration
+                pname = param[3:]  # strip 'par' prefix for lookup
+                if pname in project.setting.parameters:
+                    init_val = project.setting.parameters[pname]["initialvalue"]
+                    ax.axvline(
+                        init_val,
+                        color="black",
+                        linestyle="--",
+                        linewidth=1.5,
+                    )
+
+            # Display name: remove leading 'par' if present, and use as x-axis label
+            display_name = param[3:] if param.startswith("par") else param
+            ax.set_xlabel(display_name)
+            ax.set_title("")
+
+        # Title text depending on method
+        if method.lower() == "mcmc":
+            title_text = "Parameter distributions (MCMC, after burn-in)"
+        else:
+            title_text = f"Parameter distributions (Top {int(percentile_threshold * 100)}%)"
+
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+        plt.suptitle(title_text, y=0.98)
+
         suffix = _rep_suffix(project)
         param_plot_path = os.path.join(
             project.output_dir,
-            f"{project.setting.output}{suffix}_parameters_{like_type}.png",
+            f"{project.setting.output}{suffix}_parameters_{like_type}_{method.lower()}.png",
         )
         plt.savefig(param_plot_path, dpi=300)
         plt.close()
 
     # === BEST SIMULATION PLOT WITH TABLE ===
-    if len(df_top) == 0 or len(sim_cols) == 0:
+    if len(df_used) == 0 or len(sim_cols) == 0:
         print("[spotpy_postprocess] No simulations found to plot.")
         return
 
-    sim_array = df_top[sim_cols].to_numpy()
+    # For best simulation, still use the single best run over ALL, not just df_used
+    sim_array = df_used[sim_cols].to_numpy()
     best_sim = df_sorted.iloc[0][sim_cols].to_numpy()
 
     lower = np.percentile(sim_array, 5, axis=0)
@@ -368,18 +436,18 @@ def spotpy_postprocess(project):
         fmt="o",
         ecolor="lightblue",
         alpha=0.6,
-        label=f"Unsicherheitsband (Top {int(percentile_threshold * 100)}%)",
+        label="Uncertainty band",
     )
-    ax0.plot([min_val, max_val], [min_val, max_val], "r--", label="1:1 Linie")
+    ax0.plot([min_val, max_val], [min_val, max_val], "r--", label="1:1 line")
     ax0.scatter(
         observed_values,
         best_sim,
         color="blue",
-        label=f"Beste Simulation ({like_type} = {best_like:.3f})",
+        label=f"Best simulation ({like_type} = {best_like:.3f})",
     )
-    ax0.set_xlabel("Beobachtete Werte")
-    ax0.set_ylabel("Simulierte Werte")
-    ax0.set_title("Beste Simulation mit Unsicherheitsband")
+    ax0.set_xlabel("Observed values")
+    ax0.set_ylabel("Simulated values")
+    ax0.set_title("Best simulation with uncertainty band")
     ax0.set_xlim(0, 1.1 * max_val)
     ax0.set_ylim(0, 1.1 * max_val)
     ax0.set_aspect("equal", adjustable="box")
@@ -389,10 +457,14 @@ def spotpy_postprocess(project):
     ax1 = fig.add_subplot(gs[1])
     ax1.axis("off")
 
-    table_data = [[param, f"{value:.4g}"] for param, value in best_params.items()]
+    table_data = []
+    for param, value in best_params.items():
+        disp = param[3:] if param.startswith("par") else param
+        table_data.append([disp, f"{value:.4g}"])
+
     table = ax1.table(
         cellText=table_data,
-        colLabels=["Parameter", "Wert"],
+        colLabels=["Parameter", "Value"],
         loc="center",
         cellLoc="left",
     )
@@ -407,11 +479,13 @@ def spotpy_postprocess(project):
     suffix = _rep_suffix(project)
     scatter_plot_path = os.path.join(
         project.output_dir,
-        f"{project.setting.output}{suffix}_opt_{like_type}_with_table.png",
+        f"{project.setting.output}{suffix}_opt_{like_type}_{method.lower()}_with_table.png",
     )
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(scatter_plot_path, dpi=300)
     plt.close()
+
+
 
 
 # -------------------------------------------------------------------------
