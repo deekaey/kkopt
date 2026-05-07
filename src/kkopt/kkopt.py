@@ -46,7 +46,23 @@ class spot_setup(object):
         #objectivefunction
         self.objective_function = self._setting.get_property( 'likelihood')
 
-        #run test simulation to get test output needed for 
+        if self.parallel:
+            for i, calib in enumerate( self._setting.calibrations):
+                if calib['simulation']['datasource'].has_provider:
+                    for j, arg in enumerate( calib['simulation']['datasource'].provider._args):
+                        if j > 0:
+                            if os.path.expandvars( arg)[0] == "/":
+                                self._setting.calibrations[i]['simulation']['datasource'].provider._args[j] = self._rank_specific_path( arg)
+                            else:
+                                self._setting.calibrations[i]['simulation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)
+                    self._setting.calibrations[i]['simulation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['simulation']['datasource']._path))
+
+                if calib['evaluation']['datasource'].has_provider:
+                    for j, arg in enumerate( calib['evaluation']['datasource'].provider._args):
+                        if j == 2:
+                            self._setting.calibrations[i]['evaluation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)+                    self._setting.calibrations[i]['evaluation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['evaluation']['datasource']._path))
+
+        #run test simulation to get test output needed for
         #preparation of evaluation data (maybe not needed or implement on demand)
         #utils.kklog.log_info('Start test simulation')
         self.update_parameters( None)
@@ -103,6 +119,14 @@ class spot_setup(object):
             stop = start + base
 
         return np.arange(start, stop, dtype=int)
+
+    def _add_rank_to_path(self, path: str) -> str:
+        if not self.parallel:
+            rank = 1
+        else:
+            rank = self.rank + 1
+        path = os.path.expandvars( path)
+        return = path.replace( "."+path.split(".")[-1], f"r{rank}"+"."+path.split(".")[-1])
 
     def _rank_specific_path(self, base_path: str) -> str:
         """
@@ -739,7 +763,6 @@ class spot_setup(object):
                 np.nan, index=self._evaluation.index, name="all"
             )
             self._simulation = pd.DataFrame( sim_nan)
-            print( self._simulation)
             return self._simulation["all"].to_numpy()
 
         # 4) Try to read simulation output
