@@ -121,12 +121,37 @@ class spot_setup(object):
         return np.arange(start, stop, dtype=int)
 
     def _add_rank_to_path(self, path: str) -> str:
-        if not self.parallel:
-            rank = 1
+        """
+        Insert a rank tag 'r<rank>' before the last dot in the filename.
+
+        Examples
+        --------
+        path = "/tmp/output.txt", rank=0  -> "/tmp/outputr1.txt"
+        path = "output", rank=2           -> "outputr3"        (no extension)
+        """
+        # Determine 1-based rank
+        rank_one_based = (self.rank + 1) if self.parallel else 1
+
+        # Expand environment variables
+        path = os.path.expandvars(path)
+
+        # Split directory and filename
+        dir_name, fname = os.path.split(path)
+
+        # Find last dot in filename
+        dot_pos = fname.rfind(".")
+
+        if dot_pos == -1:
+            # No extension: just append r<rank> at the end
+            new_fname = f"{fname}r{rank_one_based}"
         else:
-            rank = self.rank + 1
-        path = os.path.expandvars( path)
-        return = path.replace( "."+path.split(".")[-1], f"r{rank}"+"."+path.split(".")[-1])
+            # Insert r<rank> before the last dot
+            name = fname[:dot_pos]
+            ext = fname[dot_pos:]  # includes the dot
+            new_fname = f"{name}r{rank_one_based}{ext}"
+
+        # Recombine with directory (if any)
+        return os.path.join(dir_name, new_fname) if dir_name else new_fname
 
     def _rank_specific_path(self, base_path: str) -> str:
         """
