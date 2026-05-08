@@ -339,7 +339,7 @@ class spot_setup(object):
 
                 # Compute scalar metric
                 if output_metric == 'rmse':
-                    val = self.objectivefunction(self._simulation, self._evaluation)
+                    val = self.objectivefunction( self._simulation, self._evaluation)
                 elif output_metric == 'mean':
                     val = np.nanmean(sim_values)
                 else:
@@ -594,29 +594,84 @@ class spot_setup(object):
     def repetitions( self) :
         return self._setting.repetitions
 
-    # This function is needed for spotpy to compare simulation and validation data
-    # Keep in mind, that you reduce your simulation data to the values that can be compared with observation data
-    # This can be done in the def simulation (than only those simulations are saved), 
-    # or in the def objectivefunctions (than all simulations are saved)
-    def objectivefunction( self, simulation, evaluation) :
+    def objectivefunction(self, simulation, evaluation):
+        """
+        Compute the objective function value.
 
-        L = np.array([])
-        for c in self._evaluation.columns:
-            if c == 'all':
-                continue
-            if self.objective_function == 'r2' :
-                L = np.append(L, spotpy.objectivefunctions.rsquared( self._evaluation[c].dropna().squeeze().values,
-                                                                     self._simulation[c].dropna().squeeze().values))
-            elif self.objective_function == 'rmse' :
-                L = np.append(L, -spotpy.objectivefunctions.rmse( self._evaluation[c].dropna().squeeze().values,
-                                                                  self._simulation[c].dropna().squeeze().values))
-            elif self.objective_function == 'mean' :
-                L = np.append(L, np.mean( self._simulation[c].dropna().squeeze().values))
+        - If simulation and evaluation are DataFrames:
+          use per-column logic as before (skip 'all', handle multiple calibrations).
+        - If both are 1D NumPy arrays:
+          compute a single objective value directly.
+        - Otherwise: raise an error.
+        """
+        # --- DataFrame case: per-column logic, as before ---
+        if isinstance(simulation, pd.DataFrame) and isinstance(evaluation, pd.DataFrame):
+            L = np.array([])
+
+            for c in evaluation.columns:
+                if c == 'all':
+                    continue
+
+                obs = evaluation[c].dropna().to_numpy().squeeze()
+                sim = simulation[c].dropna().to_numpy().squeeze()
+
+                if len(obs) != len(sim):
+                    raise ValueError(
+                        f"Length mismatch in objectivefunction for column '{c}': "
+                        f"len(evaluation)={len(obs)}, len(simulation)={len(sim)}"
+                    )
+
+                if self.objective_function == 'r2':
+                    val = spotpy.objectivefunctions.rsquared(obs, sim)
+                elif self.objective_function == 'rmse':
+                    # note: negative RMSE to turn minimization into maximization
+                    val = -spotpy.objectivefunctions.rmse(obs, sim)
+                elif self.objective_function == 'mean':
+                    val = np.mean(sim)
+                else:
+                    raise ValueError(f"Unknown output metric: {self.objective_function}")
+
+                L = np.append(L, val)
+
+            self.likes.append(np.append(L, L.mean()))
+            return L.mean()
+
+        # --- NumPy array case: single vector comparison ---
+        elif isinstance(simulation, np.ndarray) and isinstance(evaluation, np.ndarray):
+            sim = simulation.squeeze()
+            obs = evaluation.squeeze()
+
+            if sim.ndim != 1 or obs.ndim != 1:
+                raise ValueError(
+                    "For NumPy inputs, simulation and evaluation must be 1D arrays "
+                    f"(got sim.ndim={sim.ndim}, eval.ndim={obs.ndim})"
+                )
+            if len(sim) != len(obs):
+                raise ValueError(
+                    f"Length mismatch in objectivefunction: "
+                    f"len(evaluation)={len(obs)}, len(simulation)={len(sim)}"
+                )
+
+            if self.objective_function == 'r2':
+                val = spotpy.objectivefunctions.rsquared(obs, sim)
+            elif self.objective_function == 'rmse':
+                val = -spotpy.objectivefunctions.rmse(obs, sim)
+            elif self.objective_function == 'mean':
+                val = np.mean(sim)
             else:
                 raise ValueError(f"Unknown output metric: {self.objective_function}")
 
-        self.likes.append( np.append( L, L.mean()))
-        return L.mean()
+            # For array case, store as a single value in likes for consistency
+            self.likes.append(np.array([val, val]))
+            return val
+
+        # --- Unsupported types ---
+        else:
+            raise TypeError(
+                "objectivefunction expects either (DataFrame, DataFrame) or "
+                "(ndarray, ndarray) as (simulation, evaluation), "
+                f"got {type(simulation)} and {type(evaluation)}"
+            )
 
     def run_simulation( self):
         """
