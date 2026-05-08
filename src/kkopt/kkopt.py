@@ -700,14 +700,15 @@ class spot_setup(object):
     def update_parameters(self, _parameters=None):
         editor = self._setting.properties['model']['agent']
         L_input = os.path.expandvars(editor['in'])
-        L_output = os.path.expandvars(editor['out'])
+        base_out = os.path.expandvars(editor['out'])
 
-        # Handle rank-specific output path
+        # Always derive a rank-specific output directory in code,
+        # without changing the YAML.
         if self.parallel:
-            rank = self.rank + 1
-            L_output = L_output.replace("RANK", f"r{rank}")
+            rank_one_based = self.rank + 1
+            L_output = f"{base_out}_r{rank_one_based}"
         else:
-            L_output = L_output.replace("RANK", "r1")
+            L_output = f"{base_out}_r1"
 
         # read template Lresources
         with open(f"{L_input}/Lresources", "r") as f:
@@ -716,14 +717,11 @@ class spot_setup(object):
         if _parameters is not None:
             p_index = 0
             for key, v in self._setting.parameters.items():
-                pname = v["name"]           # the base parameter name
-                target = v.get("target", "")  # 'siteparameter' or 'species'
+                pname = v["name"]
+                target = v.get("target", "")
                 species = v.get("species", None)
 
-                # Build the regex pattern depending on target:
                 if target.lower() in ("siteparameter", "siteparameters", "site"):
-                    # Example: site.parameter.METRX_MUEMAX_C_CH4_PROD.value = "..."
-                    # left side: site.parameter.<pname>.value
                     left_pattern = rf"site\.parameter\.{re.escape(pname)}\.value"
                 elif target.lower() in ("speciesparameter", "speciesparameters", "species"):
                     if species is None:
@@ -733,7 +731,6 @@ class spot_setup(object):
                         )
                         p_index += 1
                         continue
-                    # Example: species.PERG.parameter.SOME_PARAMETER.value = "..."
                     left_pattern = rf"species\.{re.escape(species)}\.parameter\.{re.escape(pname)}\.value"
                 else:
                     kklog_warn(
@@ -742,13 +739,11 @@ class spot_setup(object):
                     p_index += 1
                     continue
 
-                # Full line pattern, capturing the left side up to the "="
                 pattern = re.compile(
                     rf'^({left_pattern})\s*=\s*".*?"\s*$',
                     re.MULTILINE
                 )
                 match = pattern.search(subject)
-
                 if match is None:
                     kklog_warn(
                         f'Parameter "{key}" (target="{target}") not found in Lresources; '
@@ -762,7 +757,7 @@ class spot_setup(object):
 
                 p_index += 1
 
-        # write updated Lresources
+        # write updated Lresources (rank-specific)
         if not os.path.exists(L_output):
             os.makedirs(L_output)
 
