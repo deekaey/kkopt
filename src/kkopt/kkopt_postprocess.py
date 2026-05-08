@@ -295,14 +295,15 @@ def postprocess(project):
 # SpotPy calibration postprocessing
 # -------------------------------------------------------------------------
 def spotpy_postprocess(project, method="mcmc"):
-    base = pd.read_csv(f"{project.setting.output}_base.csv")
+    reps = getattr(project.setting, "repetitions", None)
+
+    base = pd.read_csv(f"{project.setting.output}_N{reps}_base.csv")
     base = base.set_index(pd.to_datetime(base.datetime))
 
     delimiter = ","
     observed_values = base["evaluation"]
     like_type = "RMSE"  # or 'R2'
 
-    reps = getattr(project.setting, "repetitions", None)
     df = pd.read_csv(f"{project.setting.output}_N{reps}.csv", delimiter=delimiter)
 
     like_col = "like1"
