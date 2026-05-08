@@ -46,6 +46,12 @@ class spot_setup(object):
         #objectivefunction
         self.objective_function = self._setting.get_property( 'likelihood')
 
+        #run test simulation to get test output needed for
+        #preparation of evaluation data (maybe not needed or implement on demand)
+        #utils.kklog.log_info('Start test simulation')
+        self.update_parameters( None)
+        self.run_simulation()
+
         if self.parallel:
             for i, calib in enumerate( self._setting.calibrations):
                 if calib['simulation']['datasource'].has_provider:
@@ -53,20 +59,16 @@ class spot_setup(object):
                         if j > 0:
                             if os.path.expandvars( arg)[0] == "/":
                                 self._setting.calibrations[i]['simulation']['datasource'].provider._args[j] = self._rank_specific_path( arg)
-                            else:
+                            elif ".txt" in arg or ".csv" in arg:
                                 self._setting.calibrations[i]['simulation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)
                     self._setting.calibrations[i]['simulation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['simulation']['datasource']._path))
 
                 if calib['evaluation']['datasource'].has_provider:
                     for j, arg in enumerate( calib['evaluation']['datasource'].provider._args):
                         if j == 2:
-                            self._setting.calibrations[i]['evaluation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)+                    self._setting.calibrations[i]['evaluation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['evaluation']['datasource']._path))
+                            self._setting.calibrations[i]['evaluation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)
+                    self._setting.calibrations[i]['evaluation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['evaluation']['datasource']._path))
 
-        #run test simulation to get test output needed for
-        #preparation of evaluation data (maybe not needed or implement on demand)
-        #utils.kklog.log_info('Start test simulation')
-        self.update_parameters( None)
-        self.run_simulation()
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
@@ -75,9 +77,12 @@ class spot_setup(object):
 
         df_tmp = pd.concat([self._evaluation['all'], self._simulation['all']], axis=1, keys=['evaluation', 'simulation'])
 
-        output_path = f"{self._setting.output}_base.csv"
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        df_tmp.to_csv( output_path)
+        # Only rank 0 writes the base file
+        if (not self.parallel) or (self.rank == 0):
+            suffix = self._rep_suffix()
+            output_path = f"{self._setting.output}{suffix}_base.csv"
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            df_tmp.to_csv( output_path)
 
         self._simulation_default = self._simulation
         self.objectivefunction( self._simulation, self._evaluation)
@@ -456,6 +461,8 @@ class spot_setup(object):
             # 1) Run provider if present
             # ------------------------------------------------------------------
             if calib[_target]['datasource'].has_provider:
+                #for j, arg in enumerate( calib[_target]['datasource'].provider._args):
+                #    print(_target,"  ",arg)
                 calib[_target]['datasource'].provider.execute()
             datasource_name = calib[_target]['datasource'].name
 
@@ -576,7 +583,8 @@ class spot_setup(object):
 
     @property
     def dbname( self) :
-        return self._setting.output
+        suffix = self._rep_suffix()
+        return f"{self._setting.output}{suffix}"
 
     @property
     def method( self) :
@@ -875,14 +883,14 @@ def main():
             if project.parallel:
                 sampler = lspotpy_functions[setup.method](
                     setup,
-                    dbname=project.setting.output,
+                    dbname=setup.dbname,
                     dbformat=project.setting.outputformat,
                     parallel='mpi',
                 )
             else:
                 sampler = lspotpy_functions[setup.method](
                     setup,
-                    dbname=project.setting.output,
+                    dbname=setup.dbname,
                     dbformat=project.setting.outputformat,
                 )
             sampler.sample(setup.repetitions)
