@@ -100,59 +100,80 @@ class kkopt_pfreader_yaml( object) :
                 _node['datasource'], _defaults['datasource'])
         return { 'datasource':plot_source }
 
-    def read_calibrations( self) :
-        if len( self._pf_data.get( 'calibrations', [] )) == 0 :
+    def read_calibrations(self):
+        if len(self._pf_data.get('calibrations', [])) == 0:
             return 0
- 
-        calibration_info_defaults = { 'datasource': self._setting.datasource }
-        for calibration_k in self._pf_data['calibrations'] :
 
+        calibration_info_defaults = {'datasource': self._setting.datasource}
+
+        for calibration_k in self._pf_data['calibrations']:
             calibration_id = list(calibration_k.keys())[0]
-            if not self._is_valid_id( "plotID", calibration_id) :
-                return  -1
+            if not self._is_valid_id("plotID", calibration_id):
+                return -1
 
             calibration_block = calibration_k[calibration_id]
-
-            calibration_infos = self.read_calibration_infos( calibration_block, calibration_info_defaults)
-
-            #graph_info_defaults = { 'datasource':calibration_infos['datasource'] }
-
+            calibration_infos = self.read_calibration_infos(
+                calibration_block, calibration_info_defaults
+            )
             calibration_datasource = calibration_infos['datasource']
 
-            add_calibration = dict({'id': calibration_id})
+            add_calibration = {'id': calibration_id}
             if 'sampletime' in calibration_block:
-                add_calibration.update({'sampletime': calibration_block['sampletime'] })
-            for i in ['evaluation', 'simulation'] :
-                exprs = kkplot_expressions( calibration_id+'.'+i, [calibration_block[i]['name']])
-                for terminal in exprs.terminals :
-                    datasource = None
-                    terminal_with_source = [ s.strip() for s in terminal.split( DSSEP)]
-                    if len( terminal_with_source) == 1 :
+                add_calibration['sampletime'] = calibration_block['sampletime']
+
+            for target in ['evaluation', 'simulation']:
+                target_block = calibration_block[target]
+                expr_str = target_block['name']
+                exprs = kkplot_expressions(calibration_id + '.' + target, [expr_str])
+
+                # Collect variables (entity, datasource) for this target
+                variables = []
+                for terminal in exprs.terminals:
+                    terminal_with_source = [s.strip() for s in terminal.split(DSSEP)]
+                    if len(terminal_with_source) == 1:
+                        entity = terminal_with_source[0]
                         datasource = calibration_datasource
-                    elif len( terminal_with_source) == 2 :
-                        kklog_debug( 'reading datasource information for terminal "%s"' % ( terminal))
-                        datasource = self.read_source( \
-                            terminal_with_source[1], calibration_datasource)
-                    else :
-                        kklog_error( 'invalid column specification  [column=%s]' % ( terminal))
+                        datasource_name = calibration_datasource.name
+                    elif len(terminal_with_source) == 2:
+                        entity = terminal_with_source[0]
+                        ds_name = terminal_with_source[1]
+                        kklog_debug(
+                            'reading datasource information for terminal "%s"' % terminal
+                        )
+                        datasource = self.read_source(ds_name, calibration_datasource)
+                        if datasource is None:
+                            return -1
+                        datasource_name = datasource.name
+                    else:
+                        kklog_error(
+                            'invalid column specification [column=%s]' % terminal
+                        )
                         return -1
-                    if datasource is None :
-                        return -1
 
-                    add_entity = dict( {'expression': calibration_block[i]['name'], 
-                                        'entity': terminal_with_source[0],
-                                        'datasource': datasource} )
-                    if 'filter' in calibration_block[i]:
-                        add_entity.update( {'filter': calibration_block[i]['filter']} )
-                    if 'groupby' in calibration_block[i]:
-                        kklog_warn("Keyword 'groupby' is deprecated. Using 'filter' instead.")
-                        add_entity.update( {'filter': calibration_block[i]['groupby']} )
+                    variables.append({
+                        'entity': entity,
+                        'datasource': datasource,
+                        'datasource_name': datasource_name,
+                    })
 
-                    add_calibration.update({i: add_entity})
+                # Build target entry
+                target_entry = {
+                    'expression': expr_str,
+                    'variables': variables,
+                }
 
-            self._setting.calibrations.append( add_calibration)
-        return  0
+                # Optional filter/groupby
+                if 'filter' in target_block:
+                    target_entry['filter'] = target_block['filter']
+                if 'groupby' in target_block:
+                    kklog_warn("Keyword 'groupby' is deprecated. Using 'filter' instead.")
+                    target_entry['filter'] = target_block['groupby']
 
+                add_calibration[target] = target_entry
+
+            self._setting.calibrations.append(add_calibration)
+
+        return 0
     def read_evaluations( self, _calibration_block) :
         if 'evaluation' in _calibration_block :
             return _calibration_block['evaluation']

@@ -449,136 +449,133 @@ class spot_setup(object):
         _querydata.columns = [ c[:unit_offs( len(c), c.find( '['))] for c in data_columns ]
         return _querydata
 
-    def get_data( self, _target, _index=None) :
-
+    def get_data(self, _target, _index=None):
         data_out = pd.DataFrame()
-
         calibrations = self._setting.calibrations
 
-        for i, calib in enumerate( calibrations):
+        for i, calib in enumerate(calibrations):
+            target_cfg = calib[_target]
+            expression = target_cfg['expression']
+            variables = target_cfg['variables']
 
-            # ------------------------------------------------------------------
-            # 1) Run provider if present
-            # ------------------------------------------------------------------
-            if calib[_target]['datasource'].has_provider:
-                #for j, arg in enumerate( calib[_target]['datasource'].provider._args):
-                #    print(_target,"  ",arg)
-                calib[_target]['datasource'].provider.execute()
-            datasource_name = calib[_target]['datasource'].name
+            # 1) For each variable, run provider if needed and read data
+            eval_data = None
+            for var in variables:
+                ds = var['datasource']
+                entity = var['entity']
+                ds_name = ds.name
 
-            entity = calib[_target]['entity']
-            path = calib[_target]['datasource'].path
+                if ds.has_provider:
+                    ds.provider.execute()
 
-            # ------------------------------------------------------------------
-            # 2) Resolve path for MPI / rank
-            # ------------------------------------------------------------------
-            path = self._setting.calibrations[i][_target]['datasource'].path
-            if _target == "simulation":
-                path = self._rank_specific_path( path)
+                path = ds.path
+                if _target == "simulation":
+                    path = self._rank_specific_path(path)
 
-            if not os.path.exists(path):
-                kklog_error(
-                    f"File not found for calibration index {i}, "
-                    f"target='{_target}': {path}"
-                )
-                sys.exit(255)
+                if not os.path.exists(path):
+                    kklog_error(
+                        f"File not found for calibration index {i}, "
+                        f"target='{_target}': {path}"
+                    )
+                    sys.exit(255)
 
-            # ------------------------------------------------------------------
-            # 3) Read raw data
-            # ------------------------------------------------------------------
-            try:
                 data = pd.read_csv(
-                    path,
-                    header=0,
+                    path, header=0,
                     na_values=["-99.99", "na", "nan"],
                     comment="#",
                     sep="\t",
                 )
-            except Exception as e:
-                kklog_error(
-                    f"Error reading CSV for calibration index {i}, "
-                    f"target='{_target}'\n  path: {path}\n  error: {repr(e)}"
-                )
-                sys.exit(255)
+                data = self.canonicalize_headernames(data)
 
-            data = self.canonicalize_headernames(data)
-
-            if "datetime" not in data.columns:
-                kklog_error(
-                    f"'datetime' column missing in file:\n  {path}\n"
-                    f"  columns: {list(data.columns)}"
-                )
-                sys.exit(255)
-
-            # ------------------------------------------------------------------
-            # 4) Time subsetting (sampletime)
-            # ------------------------------------------------------------------
-            if "sampletime" in calib:
-                sampletime = calib["sampletime"]
-                try:
-                    t_from, t_to = sampletime.split("->")
-                except ValueError:
+                if 'datetime' not in data.columns:
                     kklog_error(
-                        f"Invalid sampletime format in calibration index {i}: "
-                        f"Invalid sampletime format in calibration index {i}: "
-                        f"'{sampletime}', expected 'YYYY-MM-DD->YYYY-MM-DD'"
+                        f"'datetime' column missing in file:\n  {path}\n"
+                        f"  columns: {list(data.columns)}"
                     )
                     sys.exit(255)
-                eval_data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to),]
-                eval_data = eval_data.set_index('datetime')
-                eval_data.index = pd.to_datetime(eval_data.index)
-            else:
-                eval_data = data
 
-            # ------------------------------------------------------------------
-            # 5) Optional filtering by columns
-            # ------------------------------------------------------------------
-            if 'filter' in calib[_target]:
-                for f in calib[_target]['filter']:
-                    for k,v in f.items():
-                        eval_data = eval_data.loc[eval_data[k].isin(v),]
+                # time subsetting
+                if 'sampletime' in calib:
+                    sampletime = calib['sampletime']
+                    try:
+                        t_from, t_to = sampletime.split("->")
+                    except ValueError:
+                        kklog_error(
+                            f"Invalid sampletime format in calibration index {i}: "
+                            f"'{sampletime}', expected 'YYYY-MM-DD->YYYY-MM-DD'"
+                        )
+                        sys.exit(255)
+                    data = data.loc[(data['datetime'] >= t_from) & (data['datetime'] <= t_to), :]
+                    data = data.set_index('datetime')
+                    data.index = pd.to_datetime(data.index)
+                else:
+                    data = data.set_index('datetime')
+                    data.index = pd.to_datetime(data.index)
 
-            # ------------------------------------------------------------------
-            # 6) Select the entity column
-            # ------------------------------------------------------------------
-            if entity not in eval_data.columns:
+                # optional filter
+                if 'filter' in target_cfg:
+                    for f in target_cfg['filter']:
+                        for k, v in f.items():
+                            data = data.loc[data[k].isin(v), :]
+
+                if entity not in data.columns:
+                    kklog_error(
+                        f"Entity '{entity}' not in columns for calibration index {i}, "
+                        f"target='{_target}'.\n  path: {path}\n  columns: {list(data.columns)}"
+                    )
+                    sys.exit(255)
+
+                # collect this variable
+                col = data[[entity]]
+                col.columns = [entity]  # ensure column name consistent
+
+                if eval_data is None:
+                    eval_data = col
+                else:
+                    # align on time index, keep all variables
+                    eval_data = eval_data.join(col, how="outer")
+
+            # 2) Replace <entity>@<datasource_name> tokens in expression
+            expr_eval = expression
+            for var in variables:
+                entity = var['entity']
+                ds_name = var['datasource_name']
+                token = f"{entity}{DSSEP}{ds_name}"
+                if token in expr_eval:
+                    expr_eval = expr_eval.replace(
+                        token,
+                        f'eval_data["{entity}"]'
+                    )
+
+            # 3) Evaluate expression
+            try:
+                result = eval(expr_eval).to_frame()
+            except Exception as e:
                 kklog_error(
-                    f"Entity '{entity}' not in columns for calibration index {i}, "
-                    f"target='{_target}'.\n  path: {path}\n  columns: {list(eval_data.columns)}"
+                    f"Error evaluating expression '{expr_eval}': {repr(e)}\n"
+                    f"{eval_data.head()}"
                 )
                 sys.exit(255)
-            eval_data = eval_data[[entity]]
 
-            # ------------------------------------------------------------------
-            # 7) Apply expression
-            # ------------------------------------------------------------------
-            expression = calib[_target]['expression']
-            expression = expression.replace( entity+DSSEP+datasource_name, 'eval_data["%s"]' %entity)
-            try:
-                eval_data = eval(expression).to_frame()
-            except TypeError:
-                kklog_error( f"TypeError: {expression}\n{eval_data.head()}")
-                sys.exit( 255)
+            # 4) Rename to calibration id and append
+            calib_id = calib['id']
+            result.columns = [calib_id]
+            data_out = pd.concat([data_out, result], axis=1)
 
-            # ------------------------------------------------------------------
-            # 8) Rename column to calibration id and append
-            # ------------------------------------------------------------------
-            calib_id = calib["id"]
-            eval_data.rename(columns={entity: calib_id}, inplace=True)
-            data_out = pd.concat([data_out, eval_data])
-
+        # aggregate across calibrations
         if _index is not None:
             collect_data = pd.DataFrame()
             for c in data_out.columns:
-                column_data_out = data_out.loc[:,c].to_frame().dropna()
-                column_data_index = _index.loc[:,c].to_frame().dropna()
-                column_data = column_data_out.loc[column_data_out.index.isin(column_data_index.index),:]
-                collect_data = pd.concat([collect_data, column_data])
+                column_data_out = data_out.loc[:, c].to_frame().dropna()
+                column_data_index = _index.loc[:, c].to_frame().dropna()
+                column_data = column_data_out.loc[
+                    column_data_out.index.isin(column_data_index.index), :
+                ]
+                collect_data = pd.concat([collect_data, column_data], axis=1)
             collect_data['all'] = collect_data.sum(axis=1)
             return collect_data
 
         data_out['all'] = data_out.sum(axis=1)
-
         return data_out
 
     @property
