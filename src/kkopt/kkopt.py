@@ -53,22 +53,56 @@ class spot_setup(object):
         self.run_simulation()
 
         if self.parallel:
-            for i, calib in enumerate( self._setting.calibrations):
-                if calib['simulation']['datasource'].has_provider:
-                    for j, arg in enumerate( calib['simulation']['datasource'].provider._args):
-                        if j > 0:
-                            if os.path.expandvars( arg)[0] == "/":
-                                self._setting.calibrations[i]['simulation']['datasource'].provider._args[j] = self._rank_specific_path( arg)
-                            elif ".txt" in arg or ".csv" in arg:
-                                self._setting.calibrations[i]['simulation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)
-                    self._setting.calibrations[i]['simulation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['simulation']['datasource']._path))
+            for i, calib in enumerate(self._setting.calibrations):
+                # --- SIMULATION DATASOURCE ---
+                sim_ds = calib['simulation']['datasource']
+                if sim_ds.has_provider:
+                    args = sim_ds.provider._args
+                    new_args = []
 
-                if calib['evaluation']['datasource'].has_provider:
-                    for j, arg in enumerate( calib['evaluation']['datasource'].provider._args):
+                    for j, arg in enumerate(args):
+                        arg_expanded = os.path.expandvars(arg)
+
+                        # First argument is usually a script or program; leave untouched
+                        if j == 0:
+                            new_args.append(arg)
+                            continue
+
+                        # If absolute path, use rank-specific file selection (_rank_specific_path)
+                        if arg_expanded.startswith("/"):
+                            new_args.append(self._rank_specific_path(arg))
+                        # If it looks like a data file (.txt or .csv), add rank before extension
+                        elif arg_expanded.endswith(".txt") or arg_expanded.endswith(".csv"):
+                            new_args.append(self._add_rank_to_path(arg))
+                        else:
+                            # Leave other arguments unchanged
+                            new_args.append(arg)
+
+                    sim_ds.provider._args = new_args
+
+                # Ensure the simulation datasource path itself is rank-specific
+                sim_path = sim_ds.path
+                sim_ds.set_path(self._add_rank_to_path(sim_path))
+
+                # --- EVALUATION DATASOURCE ---
+                eval_ds = calib['evaluation']['datasource']
+                if eval_ds.has_provider:
+                    args = eval_ds.provider._args
+                    new_args = []
+
+                    for j, arg in enumerate(args):
+                        # In your original code, only argument index 2 was modified.
+                        # If that is the data file, we can keep that logic but make it clearer:
                         if j == 2:
-                            self._setting.calibrations[i]['evaluation']['datasource'].provider._args[j] = self._add_rank_to_path( arg)
-                    self._setting.calibrations[i]['evaluation']['datasource'].set_path( self._add_rank_to_path( self._setting.calibrations[i]['evaluation']['datasource']._path))
+                            new_args.append(self._add_rank_to_path(arg))
+                        else:
+                            new_args.append(arg)
 
+                    eval_ds.provider._args = new_args
+
+                # Ensure the evaluation datasource path itself is rank-specific
+                eval_path = eval_ds.path
+                eval_ds.set_path(self._add_rank_to_path(eval_path))
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
