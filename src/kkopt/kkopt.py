@@ -54,55 +54,65 @@ class spot_setup(object):
 
         if self.parallel:
             for i, calib in enumerate(self._setting.calibrations):
-                # --- SIMULATION DATASOURCE ---
-                sim_ds = calib['simulation']['datasource']
-                if sim_ds.has_provider:
-                    args = sim_ds.provider._args
-                    new_args = []
+                # --- SIMULATION variables ---
+                sim_cfg = calib.get('simulation', {})
+                sim_vars = sim_cfg.get('variables', [])
 
-                    for j, arg in enumerate(args):
-                        arg_expanded = os.path.expandvars(arg)
+                for var in sim_vars:
+                    sim_ds = var['datasource']
 
-                        # First argument is usually a script or program; leave untouched
-                        if j == 0:
-                            new_args.append(arg)
-                            continue
+                    # Adjust provider arguments if present
+                    if sim_ds.has_provider:
+                        args = sim_ds.provider._args
+                        new_args = []
 
-                        # If absolute path, use rank-specific file selection (_rank_specific_path)
-                        if arg_expanded.startswith("/"):
-                            new_args.append(self._rank_specific_path(arg))
-                        # If it looks like a data file (.txt or .csv), add rank before extension
-                        elif arg_expanded.endswith(".txt") or arg_expanded.endswith(".csv"):
-                            new_args.append(self._add_rank_to_path(arg))
-                        else:
-                            # Leave other arguments unchanged
-                            new_args.append(arg)
+                        for j, arg in enumerate(args):
+                            arg_expanded = os.path.expandvars(arg)
 
-                    sim_ds.provider._args = new_args
+                            # First argument is usually a script/program; leave it
+                            if j == 0:
+                                new_args.append(arg)
+                                continue
 
-                # Ensure the simulation datasource path itself is rank-specific
-                sim_path = sim_ds.path
-                sim_ds.set_path(self._add_rank_to_path(sim_path))
+                            # Absolute path -> use rank-specific file selection
+                            if arg_expanded.startswith("/"):
+                                new_args.append(self._rank_specific_path(arg))
+                            # Text/CSV data file -> add rank before extension
+                            elif arg_expanded.endswith(".txt") or arg_expanded.endswith(".csv"):
+                                new_args.append(self._add_rank_to_path(arg))
+                            else:
+                                new_args.append(arg)
 
-                # --- EVALUATION DATASOURCE ---
-                eval_ds = calib['evaluation']['datasource']
-                if eval_ds.has_provider:
-                    args = eval_ds.provider._args
-                    new_args = []
+                        sim_ds.provider._args = new_args
 
-                    for j, arg in enumerate(args):
-                        # In your original code, only argument index 2 was modified.
-                        # If that is the data file, we can keep that logic but make it clearer:
-                        if j == 2:
-                            new_args.append(self._add_rank_to_path(arg))
-                        else:
-                            new_args.append(arg)
+                    # Ensure the datasource path itself is rank-specific
+                    sim_ds.set_path(self._add_rank_to_path(sim_ds.path))
 
-                    eval_ds.provider._args = new_args
+                # --- EVALUATION variables ---
+                eval_cfg = calib.get('evaluation', {})
+                eval_vars = eval_cfg.get('variables', [])
 
-                # Ensure the evaluation datasource path itself is rank-specific
-                eval_path = eval_ds.path
-                eval_ds.set_path(self._add_rank_to_path(eval_path))
+                for var in eval_vars:
+                    eval_ds = var['datasource']
+
+                    if eval_ds.has_provider:
+                        args = eval_ds.provider._args
+                        new_args = []
+
+                        for j, arg in enumerate(args):
+                            arg_expanded = os.path.expandvars(arg)
+
+                            # Original code modified only argument index 2 for evaluation;
+                            # if that is the data file, keep that behavior:
+                            if j == 2:
+                                new_args.append(self._add_rank_to_path(arg))
+                            else:
+                                new_args.append(arg)
+
+                        eval_ds.provider._args = new_args
+
+                    # Ensure the datasource path itself is rank-specific
+                    eval_ds.set_path(self._add_rank_to_path(eval_ds.path))
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
