@@ -52,67 +52,67 @@ class spot_setup(object):
         self.update_parameters( None)
         self.run_simulation()
 
-        if self.parallel:
-            for i, calib in enumerate(self._setting.calibrations):
-                # --- SIMULATION variables ---
-                sim_cfg = calib.get('simulation', {})
-                sim_vars = sim_cfg.get('variables', [])
 
-                for var in sim_vars:
-                    sim_ds = var['datasource']
+        for i, calib in enumerate(self._setting.calibrations):
+            # --- SIMULATION variables ---
+            sim_cfg = calib.get('simulation', {})
+            sim_vars = sim_cfg.get('variables', [])
 
-                    # Adjust provider arguments if present
-                    if sim_ds.has_provider:
-                        args = sim_ds.provider._args
-                        new_args = []
+            for var in sim_vars:
+                sim_ds = var['datasource']
 
-                        for j, arg in enumerate(args):
-                            arg_expanded = os.path.expandvars(arg)
+                # Adjust provider arguments if present
+                if sim_ds.has_provider:
+                    args = sim_ds.provider._args
+                    new_args = []
 
-                            # First argument is usually a script/program; leave it
-                            if j == 0:
-                                new_args.append(arg)
-                                continue
+                    for j, arg in enumerate(args):
+                        arg_expanded = os.path.expandvars(arg)
 
-                            # Absolute path -> use rank-specific file selection
-                            if arg_expanded.startswith("/"):
-                                new_args.append(self._rank_specific_path(arg))
-                            # Text/CSV data file -> add rank before extension
-                            elif arg_expanded.endswith(".txt") or arg_expanded.endswith(".csv"):
-                                new_args.append(self._add_rank_to_path(arg))
-                            else:
-                                new_args.append(arg)
+                        # First argument is usually a script/program; leave it
+                        if j == 0:
+                            new_args.append(arg)
+                            continue
 
-                        sim_ds.provider._args = new_args
+                        # Absolute path -> use rank-specific file selection
+                        if arg_expanded.startswith("/"):
+                            new_args.append(self._rank_specific_path(arg))
+                        # Text/CSV data file -> add rank before extension
+                        elif arg_expanded.endswith(".txt") or arg_expanded.endswith(".csv"):
+                            new_args.append(self._add_rank_to_path(arg))
+                        else:
+                            new_args.append(arg)
 
-                    # Ensure the datasource path itself is rank-specific
-                    sim_ds.set_path(self._add_rank_to_path(sim_ds.path))
+                    sim_ds.provider._args = new_args
 
-                # --- EVALUATION variables ---
-                eval_cfg = calib.get('evaluation', {})
-                eval_vars = eval_cfg.get('variables', [])
+                # Ensure the datasource path itself is rank-specific
+                sim_ds.set_path(self._add_rank_to_path(sim_ds.path))
 
-                for var in eval_vars:
-                    eval_ds = var['datasource']
+            # --- EVALUATION variables ---
+            eval_cfg = calib.get('evaluation', {})
+            eval_vars = eval_cfg.get('variables', [])
 
-                    if eval_ds.has_provider:
-                        args = eval_ds.provider._args
-                        new_args = []
+            for var in eval_vars:
+                eval_ds = var['datasource']
 
-                        for j, arg in enumerate(args):
-                            arg_expanded = os.path.expandvars(arg)
+                if eval_ds.has_provider:
+                    args = eval_ds.provider._args
+                    new_args = []
 
-                            # Original code modified only argument index 2 for evaluation;
-                            # if that is the data file, keep that behavior:
-                            if j == 2:
-                                new_args.append(self._add_rank_to_path(arg))
-                            else:
-                                new_args.append(arg)
+                    for j, arg in enumerate(args):
+                        arg_expanded = os.path.expandvars(arg)
 
-                        eval_ds.provider._args = new_args
+                        # Original code modified only argument index 2 for evaluation;
+                        # if that is the data file, keep that behavior:
+                        if j == 2:
+                            new_args.append(self._add_rank_to_path(arg))
+                        else:
+                            new_args.append(arg)
 
-                    # Ensure the datasource path itself is rank-specific
-                    eval_ds.set_path(self._add_rank_to_path(eval_ds.path))
+                    eval_ds.provider._args = new_args
+
+                # Ensure the datasource path itself is rank-specific
+                eval_ds.set_path(self._add_rank_to_path(eval_ds.path))
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
@@ -916,19 +916,7 @@ class spot_setup(object):
                 columns=self._evaluation.columns,
             )
 
-        # 5) Global NaN check over all calibration columns
-        if np.isnan(self._simulation.to_numpy()).any():
-            msg = (
-                f"Simulation produced NaN on rank {self.rank} "
-                "Aborting sensitivity analysis."
-            )
-            kklog_warn(msg)
-            if self.parallel:
-                MPI.COMM_WORLD.Abort(1)
-            else:
-                sys.exit(1)
-
-        # 6) Return 1D numpy array for SpotPy / SALib:
+        # 5) Return 1D numpy array for SpotPy / SALib:
         #    stack all calibrations (datetime, calib) as independent values
         return self._simulation.stack( future_stack=True).dropna().to_numpy()
 
