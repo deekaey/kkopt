@@ -119,13 +119,12 @@ class spot_setup(object):
         self._evaluation = self.get_data( 'evaluation', temp)
         self._simulation = self.get_data( 'simulation', self._evaluation)
 
-        df_tmp = pd.concat([self._evaluation['all'], self._simulation['all']], axis=1, keys=['evaluation', 'simulation'])
-
         # Only rank 0 writes the base file
         if (not self.parallel) or (self.rank == 0):
             suffix = self._rep_suffix()
             output_path = f"{self._setting.output}{suffix}_base.csv"
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            df_tmp = pd.DataFrame({'evaluation': self.evaluation(), 'simulation': self.last_simulation()}, columns=['evaluation', 'simulation'])
             df_tmp.to_csv( output_path)
 
         self._simulation_default = self._simulation
@@ -478,7 +477,6 @@ class spot_setup(object):
         #        except Exception as e:
         #            kklog_warn(f"[{method}] Could not remove local Y file '{rf}': {repr(e)}")
 
-
     @property
     def parallel( self) :
         return self._parallel
@@ -493,7 +491,7 @@ class spot_setup(object):
         _querydata.columns = [ c[:unit_offs( len(c), c.find( '['))] for c in data_columns ]
         return _querydata
 
-    def get_data(self, _target, _index=None):
+    def get_data( self, _target, _index=None):
         data_out = pd.DataFrame()
         calibrations = self._setting.calibrations
 
@@ -616,11 +614,9 @@ class spot_setup(object):
                     column_data_out.index.isin(column_data_index.index), :
                 ]
                 collect_data = pd.concat([collect_data, column_data], axis=1)
-            collect_data['all'] = collect_data.sum(axis=1)
             return collect_data
-
-        data_out['all'] = data_out.sum(axis=1)
-        return data_out
+        else:
+            return data_out
 
     @property
     def dbname( self) :
@@ -640,17 +636,18 @@ class spot_setup(object):
         Compute the objective function value.
 
         - If simulation and evaluation are DataFrames:
-          use per-column logic as before (skip 'all', handle multiple calibrations).
+          use per-column logic (one value per calibration id) and return the mean.
         - If both are 1D NumPy arrays:
           compute a single objective value directly.
         - Otherwise: raise an error.
         """
-        # --- DataFrame case: per-column logic, as before ---
+        # --- DataFrame case: per-calibration logic ---
         if isinstance(simulation, pd.DataFrame) and isinstance(evaluation, pd.DataFrame):
             L = np.array([])
 
             for c in evaluation.columns:
-                if c == 'all':
+                if c not in simulation.columns:
+                    kklog_warn(f"Column '{c}' missing in simulation; skipping in objectivefunction.")
                     continue
 
                 obs = evaluation[c].dropna().to_numpy().squeeze()
@@ -665,7 +662,7 @@ class spot_setup(object):
                 if self.objective_function == 'r2':
                     val = spotpy.objectivefunctions.rsquared(obs, sim)
                 elif self.objective_function == 'rmse':
-                    # note: negative RMSE to turn minimization into maximization
+                    # negative RMSE -> maximize
                     val = -spotpy.objectivefunctions.rmse(obs, sim)
                 elif self.objective_function == 'mean':
                     val = np.mean(sim)
@@ -674,10 +671,13 @@ class spot_setup(object):
 
                 L = np.append(L, val)
 
+            if L.size == 0:
+                raise ValueError("No overlapping calibration columns for objectivefunction.")
+
             self.likes.append(np.append(L, L.mean()))
             return L.mean()
 
-        # --- NumPy array case: single vector comparison ---
+        # --- NumPy array case: single series ---
         elif isinstance(simulation, np.ndarray) and isinstance(evaluation, np.ndarray):
             sim = simulation.squeeze()
             obs = evaluation.squeeze()
@@ -702,11 +702,9 @@ class spot_setup(object):
             else:
                 raise ValueError(f"Unknown output metric: {self.objective_function}")
 
-            # For array case, store as a single value in likes for consistency
             self.likes.append(np.array([val, val]))
             return val
 
-        # --- Unsupported types ---
         else:
             raise TypeError(
                 "objectivefunction expects either (DataFrame, DataFrame) or "
@@ -793,7 +791,7 @@ class spot_setup(object):
 
         return max_rc, runtime
 
-    def update_parameters(self, _parameters=None):
+    def update_parameters( self, _parameters=None):
         editor = self._setting.properties['model']['agent']
         L_input = os.path.expandvars(editor['in'])
         base_out = os.path.expandvars(editor['out'])
@@ -866,8 +864,7 @@ class spot_setup(object):
         with open(f"{L_output}/Lresources", "w") as f:
             f.write(subject)
 
-    def simulation( self, _parameters=None) :
-
+    def simulation( self, _parameters=None):
         # 1) Update parameters file if new parameters are given
         if _parameters is not None:
             self.update_parameters(_parameters)
@@ -882,16 +879,24 @@ class spot_setup(object):
                 f"Model call returned non-zero exit code (rc={rc}) "
                 "– filling simulation with NaNs"
             )
-            # Build a NaN series with the same index as evaluation to keep shapes consistent
-            sim_nan = pd.Series(
-                np.nan, index=self._evaluation.index, name="all"
-            )
-            self._simulation = pd.DataFrame( sim_nan)
-            return self._simulation["all"].to_numpy()
+            # Build a NaN DataFrame with the same index and columns as evaluation
+            if not isinstance(self._evaluation, pd.DataFrame):
+                raise RuntimeError(
+                    "simulation(): self._evaluation is not a DataFrame; "
+                    "cannot construct NaN simulation of matching shape."
+                )
 
-        # 4) Try to read simulation output
+            self._simulation = pd.DataFrame(
+                np.nan,
+                index=self._evaluation.index,
+                columns=self._evaluation.columns,
+            )
+            # Return stacked NaNs (SpotPy expects a 1D array)
+            return self._simulation.stack( future_stack=True).dropna().to_numpy()
+
+        # 4) Try to read simulation output (wide DataFrame)
         try:
-            sim = self.get_data("simulation", self._evaluation)
+            self._simulation = self.get_data("simulation", self._evaluation)  # wide: columns = calib ids
         except SystemExit:
             # get_data already printed an error; propagate
             raise
@@ -900,43 +905,38 @@ class spot_setup(object):
                 f"Unexpected error while loading simulation data: {repr(e)} "
                 "– filling simulation with NaNs"
             )
-            sim = pd.DataFrame(
+            if not isinstance(self._evaluation, pd.DataFrame):
+                raise RuntimeError(
+                    "simulation(): self._evaluation is not a DataFrame; "
+                    "cannot construct NaN simulation of matching shape."
+                )
+            self._simulation = pd.DataFrame(
                 np.nan,
                 index=self._evaluation.index,
-                columns=["all"],
+                columns=self._evaluation.columns,
             )
 
-        # 5) Sanity check: non-empty, correct column
-        if not isinstance(sim, pd.DataFrame) or "all" not in sim.columns:
-            kklog_warn(
-                "Loaded simulation data has unexpected structure; "
-                "expected DataFrame with column 'all'. "
-                "Filling with NaNs."
-            )
-            sim = pd.DataFrame(
-                np.nan,
-                index=self._evaluation.index,
-                columns=["all"],
-            )
-
-        self._simulation = sim
-        kklog_debug(f"Rank {self.rank + 1}  rc={rc}, runtime={runtime}, sim={self._simulation['all'].to_numpy().mean()}")
-        if np.any( np.isnan(self._simulation["all"])):
+        # 5) Global NaN check over all calibration columns
+        if np.isnan(self._simulation.to_numpy()).any():
             msg = (
                 f"Simulation produced NaN on rank {self.rank} "
                 "Aborting sensitivity analysis."
             )
-            kklog_warn( msg)
+            kklog_warn(msg)
             if self.parallel:
-                MPI.COMM_WORLD.Abort( 1)
+                MPI.COMM_WORLD.Abort(1)
             else:
                 sys.exit(1)
 
-        # 6) Return 1D numpy array for SpotPy / SALib
-        return self._simulation["all"].to_numpy()
+        # 6) Return 1D numpy array for SpotPy / SALib:
+        #    stack all calibrations (datetime, calib) as independent values
+        return self._simulation.stack( future_stack=True).dropna().to_numpy()
 
     def evaluation( self):
-        return self._evaluation['all'].squeeze().values
+        return self._evaluation.stack( future_stack=True).dropna().to_numpy()
+
+    def last_simulation( self):
+        return self._simulation.stack( future_stack=True).dropna().to_numpy()
 
     #write spoty output more userfriendly
     def finalize( self, _sampler) :
