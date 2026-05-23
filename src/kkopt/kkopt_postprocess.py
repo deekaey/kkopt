@@ -314,10 +314,10 @@ def spotpy_postprocess(project, method="mcmc"):
 
     eval_wide = base[eval_cols]
     # simplify column names
-    eval_wide.columns = [c.split(".", 1)[1] for c in eval_wide.columns]
+    #eval_wide.columns = [c.split(".", 1)[1] for c in eval_wide.columns]
 
     # Stack evaluations to match how simulation() flattens them
-    observed_series = eval_wide.stack(dropna=True, future_stack=True)
+    observed_series = eval_wide.stack(future_stack=True).dropna()
     observed_values = observed_series.to_numpy()
 
     like_type = "RMSE"  # or 'R2'
@@ -339,10 +339,12 @@ def spotpy_postprocess(project, method="mcmc"):
         )
         df_sorted = df.sort_values(by=like_col, ascending=False)
     else:
-        df["RMSE"] = df[sim_cols].apply(
-            lambda row: spotpy.objectivefunctions.rmse(row.values, observed_values),
-            axis=1,
-        )
+        sims = df[sim_cols].to_numpy()           # shape (n_runs, n_obs)
+        obs = observed_values                    # shape (n_obs,)
+
+        rmse_vals = np.sqrt(((sims - obs)**2).mean(axis=1))
+        df = df.copy()  # defragment once
+        df["RMSE"] = rmse_vals
         df_sorted = df.sort_values(by="RMSE", ascending=True)
 
     # ---- Subset depending on method ----
