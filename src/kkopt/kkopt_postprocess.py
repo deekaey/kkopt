@@ -296,15 +296,34 @@ def postprocess(project):
 # -------------------------------------------------------------------------
 def spotpy_postprocess(project, method="mcmc"):
     reps = getattr(project.setting, "repetitions", None)
+    suffix = f"_N{reps}" if reps is not None else ""
 
-    base = pd.read_csv(f"{project.setting.output}_N{reps}_base.csv")
-    base = base.set_index(pd.to_datetime(base.datetime))
+    # Load base output and reconstruct observed_values as stacked evaluation
+    base_file = f"{project.setting.output}{suffix}_base.csv"
+    base = pd.read_csv(base_file)
 
-    delimiter = ","
-    observed_values = base["evaluation"]
+    # Remove datetime for RMSE computation; we only need values
+    if "datetime" in base.columns:
+        base = base.drop(columns=["datetime"])
+
+    # Extract evaluation columns (flattened MultiIndex names like 'evaluation.DE_fendt_ext')
+    eval_cols = [c for c in base.columns if c.startswith("evaluation")]
+    if not eval_cols:
+        print("[spotpy_postprocess] No evaluation columns found in base file.")
+        return
+
+    eval_wide = base[eval_cols]
+    # simplify column names
+    eval_wide.columns = [c.split(".", 1)[1] for c in eval_wide.columns]
+
+    # Stack evaluations to match how simulation() flattens them
+    observed_series = eval_wide.stack(dropna=True, future_stack=True)
+    observed_values = observed_series.to_numpy()
+
     like_type = "RMSE"  # or 'R2'
-
-    df = pd.read_csv(f"{project.setting.output}_N{reps}.csv", delimiter=delimiter)
+    delimiter = ","
+    df_file = f"{project.setting.output}{suffix}.csv"
+    df = pd.read_csv(df_file, delimiter=delimiter)
 
     like_col = "like1"
     param_cols = [col for col in df.columns if col.startswith("par")]
@@ -326,15 +345,14 @@ def spotpy_postprocess(project, method="mcmc"):
         )
         df_sorted = df.sort_values(by="RMSE", ascending=True)
 
-    # --- Choose subset depending on method ---
+    # ---- Subset depending on method ----
     if method.lower() == "mcmc":
-        # MCMC: drop burn-in and use all remaining samples
-        burnin_frac = 0.5  # configurable if desired
+        burnin_frac = 0.5
         burnin = int(len(df_sorted) * burnin_frac)
         df_used = df_sorted.iloc[burnin:].reset_index(drop=True)
+        # optional: parameter correlation
         plot_parameter_correlations(df_used, param_cols, project, method, like_type)
     else:
-        # LHS/FAST: use top X% best runs
         percentile_threshold = 0.05
         top_n = max(1, int(len(df_sorted) * percentile_threshold))
         df_used = df_sorted.head(top_n)
@@ -356,35 +374,11 @@ def spotpy_postprocess(project, method="mcmc"):
             ax = plt.subplot(n_rows, cols_per_row, i + 1)
             sns.histplot(df_used[param], kde=True, ax=ax)
 
-            if False:
-                # LHS/FAST: show lines for the best 3 runs
-                # MCMC: optional, still meaningful to show best 3
-                for j in range(min(3, len(df_sorted))):
-                    best_params = df_sorted.iloc[j]
-                    ax.axvline(
-                        best_params[param],
-                        color="gold",
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-
-                # initial value from configuration
-                pname = param[3:]  # strip 'par' prefix for lookup
-                if pname in project.setting.parameters:
-                    init_val = project.setting.parameters[pname]["initialvalue"]
-                    ax.axvline(
-                        init_val,
-                        color="black",
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-
             # Display name: remove leading 'par' if present, and use as x-axis label
             display_name = param[3:] if param.startswith("par") else param
             ax.set_xlabel(display_name)
             ax.set_title("")
 
-        # Title text depending on method
         if method.lower() == "mcmc":
             title_text = "Parameter distributions (MCMC, after burn-in)"
         else:
@@ -393,7 +387,6 @@ def spotpy_postprocess(project, method="mcmc"):
         plt.tight_layout(rect=[0, 0, 1, 0.92])
         plt.suptitle(title_text, y=0.98)
 
-        suffix = _rep_suffix(project)
         param_plot_path = os.path.join(
             project.output_dir,
             f"{project.setting.output}{suffix}_parameters_{like_type}_{method.lower()}.png",
@@ -406,17 +399,14 @@ def spotpy_postprocess(project, method="mcmc"):
         print("[spotpy_postprocess] No simulations found to plot.")
         return
 
-    # For best simulation, still use the single best run over ALL, not just df_used
     sim_array = df_used[sim_cols].to_numpy()
     best_sim = df_sorted.iloc[0][sim_cols].to_numpy()
-
     lower = np.percentile(sim_array, 5, axis=0)
     upper = np.percentile(sim_array, 95, axis=0)
     error = [
         np.maximum(0.0, best_sim - lower),
         np.maximum(0.0, upper - best_sim),
     ]
-
     best_like = df_sorted.iloc[0][like_type]
     min_val = min(observed_values.min(), best_sim.min())
     max_val = max(observed_values.max(), best_sim.max())
@@ -424,11 +414,9 @@ def spotpy_postprocess(project, method="mcmc"):
     import matplotlib.gridspec as gridspec
 
     best_params = df_sorted.iloc[0][param_cols]
-
     fig = plt.figure(figsize=(10, 6))
     gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1])
 
-    # left: scatter with uncertainty
     ax0 = fig.add_subplot(gs[0])
     ax0.errorbar(
         observed_values,
@@ -454,15 +442,12 @@ def spotpy_postprocess(project, method="mcmc"):
     ax0.set_aspect("equal", adjustable="box")
     ax0.legend()
 
-    # right: parameter table
     ax1 = fig.add_subplot(gs[1])
     ax1.axis("off")
-
     table_data = []
     for param, value in best_params.items():
         disp = param[3:] if param.startswith("par") else param
         table_data.append([disp, f"{value:.4g}"])
-
     table = ax1.table(
         cellText=table_data,
         colLabels=["Parameter", "Value"],
@@ -477,7 +462,6 @@ def spotpy_postprocess(project, method="mcmc"):
             cell.set_width(0.5)
             cell.set_text_props(ha="left", va="center")
 
-    suffix = _rep_suffix(project)
     scatter_plot_path = os.path.join(
         project.output_dir,
         f"{project.setting.output}{suffix}_opt_{like_type}_{method.lower()}_with_table.png",
