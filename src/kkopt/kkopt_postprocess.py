@@ -543,7 +543,6 @@ def spotpy_postprocess(project, method="mcmc"):
     plt.savefig(scatter_plot_path, dpi=300)
     plt.close()
 
-
 # -------------------------------------------------------------------------
 # SALib / Sobol postprocessing
 # -------------------------------------------------------------------------
