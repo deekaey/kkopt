@@ -298,7 +298,7 @@ def spotpy_postprocess(project, method="mcmc"):
     reps = getattr(project.setting, "repetitions", None)
     suffix = f"_N{reps}" if reps is not None else ""
 
-    # Load base output and reconstruct observed_values as stacked evaluation
+    # --- 1. Load base output and reconstruct observed_values as stacked evaluation ---
     base_file = f"{project.setting.output}{suffix}_base.csv"
     base = pd.read_csv(base_file)
 
@@ -313,13 +313,14 @@ def spotpy_postprocess(project, method="mcmc"):
         return
 
     eval_wide = base[eval_cols]
-    # simplify column names
+    # simplify column names: 'evaluation.DE_fendt_ext' -> 'DE_fendt_ext'
     eval_wide.columns = [c.split(".", 1)[1] for c in eval_wide.columns]
 
     # Stack evaluations to match how simulation() flattens them
     observed_series = eval_wide.stack(dropna=True, future_stack=True)
     observed_values = observed_series.to_numpy()
 
+    # --- 2. Load SpotPy output and compute RMSE/R2 vs observed_values ---
     like_type = "RMSE"  # or 'R2'
     delimiter = ","
     df_file = f"{project.setting.output}{suffix}.csv"
@@ -329,7 +330,6 @@ def spotpy_postprocess(project, method="mcmc"):
     param_cols = [col for col in df.columns if col.startswith("par")]
     sim_cols = [col for col in df.columns if col.startswith("simulation_")]
 
-    # Compute performance metric
     if like_type == "R2":
         df["R2"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rsquared(
@@ -337,25 +337,52 @@ def spotpy_postprocess(project, method="mcmc"):
             ),
             axis=1,
         )
+        df = df.copy()  # defragment
         df_sorted = df.sort_values(by=like_col, ascending=False)
     else:
         df["RMSE"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rmse(row.values, observed_values),
             axis=1,
         )
+        df = df.copy()  # defragment
         df_sorted = df.sort_values(by="RMSE", ascending=True)
 
-    # ---- Subset depending on method ----
-    if method.lower() == "mcmc":
+    # --- 3. Define subsets depending on method ---
+    method_lower = method.lower()
+    df_resampled = None  # for LHS importance resampling
+
+    if method_lower == "mcmc":
+        # MCMC: drop burn-in and use all remaining samples
         burnin_frac = 0.5
         burnin = int(len(df_sorted) * burnin_frac)
         df_used = df_sorted.iloc[burnin:].reset_index(drop=True)
-        # optional: parameter correlation
-        plot_parameter_correlations(df_used, param_cols, project, method, like_type)
+
+        # optional: parameter correlation on post-burn-in samples
+        if len(df_used) > 0:
+            plot_parameter_correlations(df_used, param_cols, project, method_lower, like_type)
+
     else:
-        percentile_threshold = 0.05
+        # LHS/FAST: use top X% best runs for df_used
+        percentile_threshold = 0.05  # top 5%
         top_n = max(1, int(len(df_sorted) * percentile_threshold))
-        df_used = df_sorted.head(top_n)
+        df_used = df_sorted.head(top_n).reset_index(drop=True)
+
+        # LHS/FAST: importance resampling from the full LHS cloud
+        # Build weights from like1 (higher = better)
+        if "like1" in df_sorted.columns:
+            likes = df_sorted["like1"].to_numpy()
+            eps = 1e-12
+            w = likes - likes.min() + eps
+            w_sum = w.sum()
+            if w_sum <= 0:
+                print("[spotpy_postprocess] Degenerate weights, using uniform for resampling.")
+                p = np.ones_like(w) / len(w)
+            else:
+                p = w / w_sum
+
+            N_resample = min(1000, len(df_sorted))  # number of resampled draws
+            idx_resampled = np.random.choice(len(df_sorted), size=N_resample, replace=True, p=p)
+            df_resampled = df_sorted.iloc[idx_resampled].reset_index(drop=True)
 
     if len(df_used) == 0:
         print(f"[spotpy_postprocess] No usable samples found for method={method}.")
@@ -363,7 +390,7 @@ def spotpy_postprocess(project, method="mcmc"):
 
     os.makedirs(project.output_dir, exist_ok=True)
 
-    # === PARAMETER DISTRIBUTIONS ===
+    # --- 4. PARAMETER DISTRIBUTIONS (df_used: post-burn-in for MCMC, top 5% for LHS/FAST) ---
     n_params = len(param_cols)
     if n_params > 0:
         cols_per_row = 5
@@ -374,12 +401,11 @@ def spotpy_postprocess(project, method="mcmc"):
             ax = plt.subplot(n_rows, cols_per_row, i + 1)
             sns.histplot(df_used[param], kde=True, ax=ax)
 
-            # Display name: remove leading 'par' if present, and use as x-axis label
             display_name = param[3:] if param.startswith("par") else param
             ax.set_xlabel(display_name)
             ax.set_title("")
 
-        if method.lower() == "mcmc":
+        if method_lower == "mcmc":
             title_text = "Parameter distributions (MCMC, after burn-in)"
         else:
             title_text = f"Parameter distributions (Top {int(percentile_threshold * 100)}%)"
@@ -389,16 +415,44 @@ def spotpy_postprocess(project, method="mcmc"):
 
         param_plot_path = os.path.join(
             project.output_dir,
-            f"{project.setting.output}{suffix}_parameters_{like_type}_{method.lower()}.png",
+            f"{project.setting.output}{suffix}_parameters_{like_type}_{method_lower}.png",
         )
         plt.savefig(param_plot_path, dpi=300)
         plt.close()
 
-    # === BEST SIMULATION PLOT WITH TABLE ===
+    # --- 5. LHS/FAST: Importance-resampled parameter distributions ---
+    if method_lower in ("lhs", "fast") and df_resampled is not None and n_params > 0:
+        cols_per_row = 5
+        n_rows = math.ceil(n_params / cols_per_row)
+        plt.figure(figsize=(cols_per_row * 3, n_rows * 3))
+
+        for i, param in enumerate(param_cols):
+            ax = plt.subplot(n_rows, cols_per_row, i + 1)
+            sns.histplot(df_resampled[param], kde=True, ax=ax)
+
+            display_name = param[3:] if param.startswith("par") else param
+            ax.set_xlabel(display_name)
+            ax.set_title("")
+
+        plt.tight_layout(rect=[0, 0, 1, 0.92])
+        plt.suptitle(
+            "Parameter distributions (LHS/FAST, importance-resampled)",
+            y=0.98,
+        )
+
+        param_resampled_plot_path = os.path.join(
+            project.output_dir,
+            f"{project.setting.output}{suffix}_parameters_{like_type}_{method_lower}_resampled.png",
+        )
+        plt.savefig(param_resampled_plot_path, dpi=300)
+        plt.close()
+
+    # --- 6. BEST SIMULATION PLOT WITH TABLE ---
     if len(df_used) == 0 or len(sim_cols) == 0:
         print("[spotpy_postprocess] No simulations found to plot.")
         return
 
+    # For best simulation, still use the single best run over ALL, not just df_used
     sim_array = df_used[sim_cols].to_numpy()
     best_sim = df_sorted.iloc[0][sim_cols].to_numpy()
     lower = np.percentile(sim_array, 5, axis=0)
@@ -408,15 +462,21 @@ def spotpy_postprocess(project, method="mcmc"):
         np.maximum(0.0, upper - best_sim),
     ]
     best_like = df_sorted.iloc[0][like_type]
+
     min_val = min(observed_values.min(), best_sim.min())
     max_val = max(observed_values.max(), best_sim.max())
 
     import matplotlib.gridspec as gridspec
 
+    # --- 6a. Single best, mean, median of df_used ---
     best_params = df_sorted.iloc[0][param_cols]
+    mean_params = df_used[param_cols].mean()
+    median_params = df_used[param_cols].median()
+
     fig = plt.figure(figsize=(10, 6))
     gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1])
 
+    # left: scatter with uncertainty
     ax0 = fig.add_subplot(gs[0])
     ax0.errorbar(
         observed_values,
@@ -442,15 +502,28 @@ def spotpy_postprocess(project, method="mcmc"):
     ax0.set_aspect("equal", adjustable="box")
     ax0.legend()
 
+    # right: parameter table with Best, Mean, Median
     ax1 = fig.add_subplot(gs[1])
     ax1.axis("off")
+
     table_data = []
-    for param, value in best_params.items():
+    # Header row
+    table_data.append(["", "Best", "Mean", "Median"])
+    for param in param_cols:
         disp = param[3:] if param.startswith("par") else param
-        table_data.append([disp, f"{value:.4g}"])
+        best_val = best_params[param]
+        mean_val = mean_params[param]
+        median_val = median_params[param]
+        table_data.append([
+            disp,
+            f"{best_val:.4g}",
+            f"{mean_val:.4g}",
+            f"{median_val:.4g}",
+        ])
+
     table = ax1.table(
         cellText=table_data,
-        colLabels=["Parameter", "Value"],
+        colLabels=["Parameter", "Best", "Mean", "Median"],
         loc="center",
         cellLoc="left",
     )
@@ -458,19 +531,17 @@ def spotpy_postprocess(project, method="mcmc"):
     table.auto_set_font_size(False)
     table.set_fontsize(8)
     for (row, col), cell in table.get_celld().items():
-        if col == 1:
+        if col > 0:
             cell.set_width(0.5)
             cell.set_text_props(ha="left", va="center")
 
     scatter_plot_path = os.path.join(
         project.output_dir,
-        f"{project.setting.output}{suffix}_opt_{like_type}_{method.lower()}_with_table.png",
+        f"{project.setting.output}{suffix}_opt_{like_type}_{method_lower}_with_table.png",
     )
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(scatter_plot_path, dpi=300)
     plt.close()
-
-
 
 
 # -------------------------------------------------------------------------
