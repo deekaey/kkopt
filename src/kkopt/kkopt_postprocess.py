@@ -317,7 +317,7 @@ def spotpy_postprocess(project, method="mcmc"):
     eval_wide.columns = [c.split(".", 1)[1] for c in eval_wide.columns]
 
     # Stack evaluations to match how simulation() flattens them
-    observed_series = eval_wide.stack(dropna=True, future_stack=True)
+    observed_series = eval_wide.stack( future_stack=True)
     observed_values = observed_series.to_numpy()
 
     # --- 2. Load SpotPy output and compute RMSE/R2 vs observed_values ---
