@@ -306,19 +306,7 @@ def spotpy_postprocess(project, method="mcmc"):
     if "datetime" in base.columns:
         base = base.drop(columns=["datetime"])
 
-    # Extract evaluation columns (flattened MultiIndex names like 'evaluation.DE_fendt_ext')
-    eval_cols = [c for c in base.columns if c.startswith("evaluation")]
-    if not eval_cols:
-        print("[spotpy_postprocess] No evaluation columns found in base file.")
-        return
-
-    eval_wide = base[eval_cols]
-    # simplify column names: 'evaluation.DE_fendt_ext' -> 'DE_fendt_ext'
-    eval_wide.columns = [c.split(".", 1)[1] for c in eval_wide.columns]
-
-    # Stack evaluations to match how simulation() flattens them
-    observed_series = eval_wide.stack( future_stack=True)
-    observed_values = observed_series.to_numpy()
+    observed_values = base["evaluation"].to_numpy()
 
     # --- 2. Load SpotPy output and compute RMSE/R2 vs observed_values ---
     like_type = "RMSE"  # or 'R2'
@@ -331,20 +319,20 @@ def spotpy_postprocess(project, method="mcmc"):
     sim_cols = [col for col in df.columns if col.startswith("simulation_")]
 
     if like_type == "R2":
+        df = df.copy()  # defragment
         df["R2"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rsquared(
                 row.values, observed_values
             ),
             axis=1,
         )
-        df = df.copy()  # defragment
         df_sorted = df.sort_values(by=like_col, ascending=False)
     else:
+        df = df.copy()  # defragment
         df["RMSE"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rmse(row.values, observed_values),
             axis=1,
         )
-        df = df.copy()  # defragment
         df_sorted = df.sort_values(by="RMSE", ascending=True)
 
     # --- 3. Define subsets depending on method ---
@@ -363,25 +351,67 @@ def spotpy_postprocess(project, method="mcmc"):
 
     else:
         # LHS/FAST: use top X% best runs for df_used
-        percentile_threshold = 0.05  # top 5%
+        percentile_threshold = 0.01  # top x%
         top_n = max(1, int(len(df_sorted) * percentile_threshold))
         df_used = df_sorted.head(top_n).reset_index(drop=True)
 
         # LHS/FAST: importance resampling from the full LHS cloud
         # Build weights from like1 (higher = better)
         if "like1" in df_sorted.columns:
+            # Extract the 'like1' column as a NumPy array.
             likes = df_sorted["like1"].to_numpy()
+
+            # Small epsilon used to avoid zero weights when we shift likes.
             eps = 1e-12
+
+            # Shift likes so that the smallest like1 becomes ~0.
+            # This ensures that all weights are >= eps:
+            #   w_i = like_i - min(like) + eps
+            # Worst run: like_i = min(like)  -> w_i ≈ eps
+            # Best run:  like_i = max(like)  -> w_i ≈ (max - min) + eps
             w = likes - likes.min() + eps
+
+            # Exponent alpha controls how strongly the weights emphasize high-likelihood runs:
+            #   - alpha > 1: sharpen weights (good runs get much higher weight)
+            #   - alpha = 1: linear weighting (current behavior)
+            #   - alpha < 1: flatten weights (differences in like1 matter less)
+            alpha = 1.0  # >1 sharpens; <1 flattens
+            w = np.power(w, alpha)
+
+            # Sum of weights for normalization.
             w_sum = w.sum()
+
             if w_sum <= 0:
+                # In a pathological case where all weights are zero or NaN
+                # (e.g. all likes identical and shifting failed),
+                # fall back to uniform sampling across all runs.
                 print("[spotpy_postprocess] Degenerate weights, using uniform for resampling.")
                 p = np.ones_like(w) / len(w)
             else:
+                # Convert weights into probabilities for resampling:
+                #   p_i = w_i / Σ_j w_j
+                # These probabilities are used as the sampling distribution over the LHS cloud.
                 p = w / w_sum
 
-            N_resample = min(1000, len(df_sorted))  # number of resampled draws
-            idx_resampled = np.random.choice(len(df_sorted), size=N_resample, replace=True, p=p)
+            # Decide how many samples to draw from the weighted LHS cloud.
+            # Here: resample 10% of all runs (with replacement).
+            # For example, if you had 5000 LHS points, N_resample = 500.
+            # You could also cap this with min(1000, len(df_sorted)) if you want a fixed upper limit.
+            N_resample = int(0.1 * len(df_sorted))  # number of resampled draws
+
+            # Draw indices from 0..len(df_sorted)-1 with replacement,
+            # according to the probability vector p.
+            # This is importance resampling: good runs (high like1) are more likely,
+            # but all runs (except the very worst) still have a chance to be drawn.
+            idx_resampled = np.random.choice(
+                len(df_sorted),
+                size=N_resample,
+                replace=True,
+                p=p
+            )
+
+            # Build a new DataFrame with the resampled rows.
+            # reset_index(drop=True) makes the row index 0..N_resample-1, for convenience.
             df_resampled = df_sorted.iloc[idx_resampled].reset_index(drop=True)
 
     if len(df_used) == 0:
@@ -473,7 +503,7 @@ def spotpy_postprocess(project, method="mcmc"):
     mean_params = df_used[param_cols].mean()
     median_params = df_used[param_cols].median()
 
-    fig = plt.figure(figsize=(10, 6))
+    fig = plt.figure(figsize=(15, 6))
     gs = gridspec.GridSpec(1, 2, width_ratios=[3, 1])
 
     # left: scatter with uncertainty
@@ -508,7 +538,7 @@ def spotpy_postprocess(project, method="mcmc"):
 
     table_data = []
     # Header row
-    table_data.append(["", "Best", "Mean", "Median"])
+    #table_data.append(["", "Best", "Mean", "Median"])
     for param in param_cols:
         disp = param[3:] if param.startswith("par") else param
         best_val = best_params[param]

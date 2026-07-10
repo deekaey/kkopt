@@ -30,7 +30,7 @@ with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
     LONG_DESCRIPTION = f.read()
 
 INSTALL_REQUIRES = [
-    "python-dotenv",  # if 'dotenv' really means this package name
+    "python-dotenv",
     "numexpr",
     "spotpy",
     "numpy",
@@ -38,7 +38,7 @@ INSTALL_REQUIRES = [
     "pyyaml",
     "seaborn",
     "mpi4py",
-    "SALib",          # correct PyPI name
+    "SALib",
     "kkplot @ git+https://github.com/deekaey/kkplot.git",
 ]
 
