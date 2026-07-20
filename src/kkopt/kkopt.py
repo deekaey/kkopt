@@ -53,7 +53,7 @@ class spot_setup(object):
         self.run_simulation()
 
 
-        for i, calib in enumerate(self._setting.calibrations):
+        for i, calib in enumerate( self._setting.calibrations):
             # --- SIMULATION variables ---
             sim_cfg = calib.get('simulation', {})
             sim_vars = sim_cfg.get('variables', [])
@@ -79,14 +79,14 @@ class spot_setup(object):
                             new_args.append(self._rank_specific_path(arg))
                         # Text/CSV data file -> add rank before extension
                         elif arg_expanded.endswith(".txt") or arg_expanded.endswith(".csv"):
-                            new_args.append(self._add_rank_to_path(arg))
+                            new_args.append( self._add_rank_to_path( arg))
                         else:
                             new_args.append(arg)
 
                     sim_ds.provider._args = new_args
 
                 # Ensure the datasource path itself is rank-specific
-                sim_ds.set_path(self._add_rank_to_path(sim_ds.path))
+                sim_ds.set_path( self._add_rank_to_path( sim_ds.path))
 
             # --- EVALUATION variables ---
             eval_cfg = calib.get('evaluation', {})
@@ -105,14 +105,14 @@ class spot_setup(object):
                         # Original code modified only argument index 2 for evaluation;
                         # if that is the data file, keep that behavior:
                         if j == 2:
-                            new_args.append(self._add_rank_to_path(arg))
+                            new_args.append( self._add_rank_to_path( arg))
                         else:
                             new_args.append(arg)
 
                     eval_ds.provider._args = new_args
 
                 # Ensure the datasource path itself is rank-specific
-                eval_ds.set_path(self._add_rank_to_path(eval_ds.path))
+                eval_ds.set_path( self._add_rank_to_path( eval_ds.path))
 
         #prepare evaluation data
         temp = self.get_data( 'simulation')
@@ -168,39 +168,6 @@ class spot_setup(object):
 
         return np.arange(start, stop, dtype=int)
 
-    def _add_rank_to_path(self, path: str) -> str:
-        """
-        Insert a rank tag 'r<rank>' before the last dot in the filename.
-
-        Examples
-        --------
-        path = "/tmp/output.txt", rank=0  -> "/tmp/outputr1.txt"
-        path = "output", rank=2           -> "outputr3"        (no extension)
-        """
-        # Determine 1-based rank
-        rank_one_based = (self.rank + 1) if self.parallel else 1
-
-        # Expand environment variables
-        path = os.path.expandvars(path)
-
-        # Split directory and filename
-        dir_name, fname = os.path.split(path)
-
-        # Find last dot in filename
-        dot_pos = fname.rfind(".")
-
-        if dot_pos == -1:
-            # No extension: just append r<rank> at the end
-            new_fname = f"{fname}r{rank_one_based}"
-        else:
-            # Insert r<rank> before the last dot
-            name = fname[:dot_pos]
-            ext = fname[dot_pos:]  # includes the dot
-            new_fname = f"{name}r{rank_one_based}{ext}"
-
-        # Recombine with directory (if any)
-        return os.path.join(dir_name, new_fname) if dir_name else new_fname
-
     def _rank_specific_path(self, base_path: str) -> str:
         """
         Given a base file path, build and return a rank-specific variant if in parallel.
@@ -253,6 +220,9 @@ class spot_setup(object):
             f"  rank={rank}\n  base: {base_path}"
         )
         return base_path
+
+    def _add_rank_to_path(self, path: str) -> str:
+        return self._rank_specific_path( path)
 
     def build_salib_problem( self):
         """
@@ -650,16 +620,23 @@ class spot_setup(object):
                     kklog_warn(f"Column '{c}' missing in simulation; skipping in objectivefunction.")
                     continue
 
-                obs = evaluation[c].dropna().to_numpy().squeeze()
-                sim = simulation[c].dropna().to_numpy().squeeze()
+                obs = evaluation[c].dropna().to_numpy()
+                sim = simulation[c].dropna().to_numpy()
 
-                if len(obs) != len(sim):
+                n_obs = len(obs)
+                n_sim = len(sim)
+
+                if n_obs != n_sim:
                     raise ValueError(
-                        f"Length mismatch in objectivefunction for column '{c}': "
-                        f"len(evaluation)={len(obs)}, len(simulation)={len(sim)}"
+                        f"Column '{c}': evaluation ({n_obs}) and simulation ({n_sim}) "
+                        "have different lengths after removing NaNs."
                     )
 
                 if self.objective_function == 'r2':
+                    if n_obs < 3:
+                        raise ValueError(
+                            f"Column '{c}': r2 requires at least 3 values, got {n_obs}."
+                        )
                     val = spotpy.objectivefunctions.rsquared(obs, sim)
                 elif self.objective_function == 'rmse':
                     # negative RMSE -> maximize
@@ -679,8 +656,8 @@ class spot_setup(object):
 
         # --- NumPy array case: single series ---
         elif isinstance(simulation, np.ndarray) and isinstance(evaluation, np.ndarray):
-            sim = simulation.squeeze()
-            obs = evaluation.squeeze()
+            sim = simulation
+            obs = evaluation
 
             if sim.ndim != 1 or obs.ndim != 1:
                 raise ValueError(
@@ -796,13 +773,11 @@ class spot_setup(object):
         L_input = os.path.expandvars(editor['in'])
         base_out = os.path.expandvars(editor['out'])
 
-        # Always derive a rank-specific output directory in code,
-        # without changing the YAML.
-        if self.parallel:
-            rank_one_based = self.rank + 1
-            L_output = f"{base_out}_r{rank_one_based}"
+        rank_suffix = f"r{self.rank + 1}" if self.parallel else "r1"
+        if "RANK" in base_out:
+            L_output = base_out.replace("RANK", rank_suffix)
         else:
-            L_output = f"{base_out}_r1"
+            L_output = f"{base_out}_{rank_suffix}"
 
         # read template Lresources
         with open(f"{L_input}/Lresources", "r") as f:
