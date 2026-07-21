@@ -353,8 +353,10 @@ class spot_setup(object):
                 # Compute scalar metric
                 if output_metric == 'rmse':
                     val = self.objectivefunction( self._simulation, self._evaluation)
+                if output_metric == 'rrmse':
+                    val = self.objectivefunction( self._simulation, self._evaluation)
                 elif output_metric == 'mean':
-                    val = np.nanmean(sim_values)
+                    val = np.nanmean( sim_values)
                 else:
                     raise ValueError(f"Unknown output_metric: {output_metric}")
 
@@ -637,10 +639,13 @@ class spot_setup(object):
                         raise ValueError(
                             f"Column '{c}': r2 requires at least 3 values, got {n_obs}."
                         )
-                    val = spotpy.objectivefunctions.rsquared(obs, sim)
+                    val = spotpy.objectivefunctions.rsquared( obs, sim)
                 elif self.objective_function == 'rmse':
-                    # negative RMSE -> maximize
-                    val = -spotpy.objectivefunctions.rmse(obs, sim)
+                    # negative rmse -> maximize
+                    val = -spotpy.objectivefunctions.rmse( obs, sim)
+                elif self.objective_function == 'rrmse':
+                    # negative rrmse -> maximize
+                    val = -spotpy.objectivefunctions.rrmse( obs, sim)
                 elif self.objective_function == 'mean':
                     val = np.mean(sim)
                 else:
@@ -671,9 +676,11 @@ class spot_setup(object):
                 )
 
             if self.objective_function == 'r2':
-                val = spotpy.objectivefunctions.rsquared(obs, sim)
+                val = spotpy.objectivefunctions.rsquared( obs, sim)
             elif self.objective_function == 'rmse':
-                val = -spotpy.objectivefunctions.rmse(obs, sim)
+                val = -spotpy.objectivefunctions.rmse( obs, sim)
+            elif self.objective_function == 'rrmse':
+                val = -spotpy.objectivefunctions.rrmse( obs, sim)
             elif self.objective_function == 'mean':
                 val = np.mean(sim)
             else:
