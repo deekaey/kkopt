@@ -26,7 +26,7 @@ from kkplot.kkplot_figure import DSSEP
 
 import kkopt.kkutils as utils
 from kkopt.kkopt_project import kkopt_project
-from kkopt.kkopt_postprocess import postprocess
+from kkopt.postprocess.kkopt_postprocess import postprocess
 
 class spot_setup(object):
     def __init__( self, _config, _project):
@@ -50,8 +50,8 @@ class spot_setup(object):
         #preparation of evaluation data (maybe not needed or implement on demand)
         #utils.kklog.log_info('Start test simulation')
         self.update_parameters( None)
-        self.run_simulation()
 
+        self.run_simulation()
 
         for i, calib in enumerate( self._setting.calibrations):
             # --- SIMULATION variables ---
@@ -124,8 +124,16 @@ class spot_setup(object):
             suffix = self._rep_suffix()
             output_path = f"{self._setting.output}{suffix}_base.csv"
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            df_tmp = pd.DataFrame({'evaluation': self.evaluation(), 'simulation': self.last_simulation()}, columns=['evaluation', 'simulation'])
-            df_tmp.to_csv( output_path)
+
+            evaluation_df = self.evaluation_df().set_index(['calibration_id', 'time'])
+            simulation_df = self.last_simulation_df().set_index(['calibration_id', 'time'])
+
+            df_stacked = pd.DataFrame({
+                'evaluation': evaluation_df['value'],
+                'simulation': simulation_df['value']
+            }).dropna()
+
+            df_stacked.to_csv( output_path)
 
         self._simulation_default = self._simulation
         self.objectivefunction( self._simulation, self._evaluation)
@@ -600,6 +608,10 @@ class spot_setup(object):
         return self._setting.method
 
     @property
+    def likelihood( self) :
+        return self._setting.likelihood
+
+    @property
     def repetitions( self) :
         return self._setting.repetitions
 
@@ -880,7 +892,6 @@ class spot_setup(object):
         try:
             self._simulation = self.get_data("simulation", self._evaluation)  # wide: columns = calib ids
         except SystemExit:
-            # get_data already printed an error; propagate
             raise
         except Exception as e:
             kklog_warn(
@@ -899,14 +910,28 @@ class spot_setup(object):
             )
 
         # 5) Return 1D numpy array for SpotPy / SALib:
-        #    stack all calibrations (datetime, calib) as independent values
-        return self._simulation.stack( future_stack=True).dropna().to_numpy()
+        transposed = self._simulation.T
+        return transposed.stack( future_stack=True).dropna().to_numpy()
 
     def evaluation( self):
-        return self._evaluation.stack( future_stack=True).dropna().to_numpy()
+        transposed = self._evaluation.T
+        return transposed.stack( future_stack=True).dropna().to_numpy()
 
-    def last_simulation( self):
-        return self._simulation.stack( future_stack=True).dropna().to_numpy()
+    def evaluation_df( self):
+        # Transpose the DataFrame to order values column-wise
+        transposed = self._evaluation.T
+        stacked = transposed.stack(future_stack=True).dropna()
+        df_stacked = stacked.to_frame(name='value').reset_index()
+        df_stacked.columns = ['calibration_id', 'time', 'value']
+        return df_stacked
+
+    def last_simulation_df( self):
+        # Transpose the DataFrame to order values column-wise
+        transposed = self._simulation.T
+        stacked = transposed.stack(future_stack=True).dropna()
+        df_stacked = stacked.to_frame(name='value').reset_index()
+        df_stacked.columns = ['calibration_id', 'time', 'value']
+        return df_stacked
 
     #write spoty output more userfriendly
     def finalize( self, _sampler) :
@@ -930,10 +955,10 @@ def main():
         load_dotenv(kkplot_env)
 
     config = utils.configuration()
-    project = kkopt_project(config, _parallel=parallel)
+    project = kkopt_project( config, _parallel=parallel)
 
     if not config.nosim():
-        setup = spot_setup(config, project)
+        setup = spot_setup( config, project)
 
         if setup.method in ['mcmc', 'fast', 'lhs']:
             lspotpy_functions = {

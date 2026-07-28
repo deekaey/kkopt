@@ -6,7 +6,6 @@ from kkplot.kkplot_figure import kkplot_datasource
 from kkplot.kkplot_figure import kkplot_expressions
 from kkplot.kkplot_figure import DSSEP
 from kkplot.kkplot_pfyaml import load as kkopt_load
-from kkplot.kkplot_pfyaml import merge_plotfiles
 import kkplot.kkplot_provider as kkplot_provider
 import yaml
 

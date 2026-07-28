@@ -115,6 +115,10 @@ class kkopt_setting( object) :
         return self._properties['repetitions']
 
     @property
+    def likelihood( self) :
+        return self._properties['likelihood']
+
+    @property
     def method( self) :
         return self._properties['method']
 

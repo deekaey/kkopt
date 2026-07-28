@@ -36,10 +36,6 @@ class kkopt_project( object) :
     def series_kinds( self) :
         return  [ 'time', 'space', 'non']
 
-    @property
-    def plotfile( self) :
-        return  self._pf_name
-
     def get_property( self, _property, _default=None) :
         return self._figure.get_property( _property, _default)
 
