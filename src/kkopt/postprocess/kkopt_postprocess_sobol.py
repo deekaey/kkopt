@@ -15,7 +15,7 @@ def _build_salib_problem_from_project(project):
         'names': names,
         'bounds': bounds,
     }
-    
+
 def salib_sobol_analysis_from_y(project):
     """
     Compute Sobol indices from stored param_values and Y (no simulation).
@@ -201,3 +201,204 @@ def salib_morris_analysis_from_y(project):
         header=header,
         comments="",
     )
+
+
+# -------------------------------------------------------------------------
+# SALib / Sobol postprocessing
+# -------------------------------------------------------------------------
+def salib_sobol_postprocess(project):
+    """
+    Postprocess Sobol sensitivity results created by run_sensitivity(method='sobol').
+
+    Expects files:
+      <output>_sobol_S1.csv
+      <output>_sobol_ST.csv
+      <output>_sobol_S2.csv
+    """
+    suffix = _rep_suffix(project)
+    base = project.setting.output + "_sobol" + suffix
+    out_dir = project.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+
+    S1_file = base + "_S1.csv"
+    ST_file = base + "_ST.csv"
+    S2_file = base + "_S2.csv"
+
+    if not (os.path.exists(S1_file) and os.path.exists(ST_file)):
+        print(
+            f"[salib_sobol_postprocess] Sobol files not found "
+            f"({S1_file}, {ST_file}). Skipping."
+        )
+        return
+
+    # --- Load S1 and ST ---
+    df_S1 = pd.read_csv(S1_file, header=None, names=["name", "S1"])
+    df_ST = pd.read_csv(ST_file, header=None, names=["name", "ST"])
+
+    df = df_S1.merge(df_ST, on="name")
+    df["S1"] = df["S1"].astype(float)
+    df["ST"] = df["ST"].astype(float)
+    df_sorted = df.sort_values(by="ST", ascending=False)
+
+    # Save merged indices
+    df_sorted.to_csv(base + "_S1_ST_sorted.csv", index=False)
+
+    # --- Bar plot of S1 and ST ---
+    names = df_sorted["name"].values
+    S1 = df_sorted["S1"].values
+    ST = df_sorted["ST"].values
+
+    x = np.arange(len(names))
+    width = 0.35
+
+    plt.figure(figsize=(0.6 * len(names) + 2, 5))
+    plt.bar(x - width / 2, S1, width, label="S1 (First-order)")
+    plt.bar(x + width / 2, ST, width, label="ST (Total-order)")
+
+    plt.xticks(x, names, rotation=45, ha="right")
+    plt.ylabel("Sobol-Index")
+    plt.title("Sobol sensitivity indices")
+    if len(ST) > 0:
+        plt.ylim(0, 1.1 * max(ST.max(), S1.max()))
+    plt.legend()
+    plt.tight_layout()
+
+    bar_plot_path = os.path.join(
+        out_dir, f"{project.setting.output}{suffix}_sobol_S1_ST.png"
+    )
+    plt.savefig(bar_plot_path, dpi=300)
+    plt.close()
+
+    # --- S2 interaction heatmap (if file exists) ---
+    if os.path.exists(S2_file):
+        df_S2 = pd.read_csv(S2_file, header=None, names=["i", "j", "S2"])
+
+        names_all = sorted(list(set(df_S2["i"]).union(set(df_S2["j"]))))
+
+        def shorten(name: str) -> str:
+            if "." in name:
+                return name.split(".")[-1]
+            return name
+
+        labels = [shorten(n) for n in names_all]
+
+        name_to_idx = {n: i for i, n in enumerate(names_all)}
+        mat = np.zeros((len(names_all), len(names_all)))
+
+        for _, row in df_S2.iterrows():
+            i = name_to_idx[row["i"]]
+            j = name_to_idx[row["j"]]
+            val = float(row["S2"])
+            mat[i, j] = val
+            mat[j, i] = val  # symmetric
+
+        n = len(names_all)
+        width = max(6, min(0.4 * n + 2, 16))
+        height = width
+
+        fig, ax = plt.subplots(figsize=(width, height))
+        im = ax.imshow(mat, cmap="viridis", interpolation="nearest")
+
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+
+        plt.setp(
+            ax.get_xticklabels(),
+            rotation=45,
+            ha="right",
+            rotation_mode="anchor",
+            fontsize=8,
+        )
+        for tick in ax.get_yticklabels():
+            tick.set_fontsize(8)
+
+        ax.set_title("Sobol S2 interaction indices", pad=20)
+
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.set_ylabel("S2", rotation=90)
+        cbar.ax.tick_params(labelsize=8)
+
+        plt.tight_layout()
+        heatmap_path = os.path.join(
+            out_dir, f"{project.setting.output}_sobol{suffix}_S2.png"
+        )
+        plt.savefig(heatmap_path, dpi=300)
+        plt.close()
+    else:
+        print(f"[salib_sobol_postprocess] {S2_file} not found. No S2 heatmap created.")
+
+
+# -------------------------------------------------------------------------
+# SALib / Morris postprocessing
+# -------------------------------------------------------------------------
+def salib_morris_postprocess(project):
+    """
+    Postprocess Morris sensitivity results created by run_sensitivity(method='morris').
+
+    Expects file:
+      <output>_morris_indices.csv
+    with columns: name, mu_star, sigma, mu
+    """
+    suffix = _rep_suffix(project)
+    base = project.setting.output + "_morris" + suffix
+    out_dir = project.output_dir
+    os.makedirs(out_dir, exist_ok=True)
+
+    indices_file = base + "_indices.csv"
+    if not os.path.exists(indices_file):
+        print(
+            f"[salib_morris_postprocess] Morris indices file not found: "
+            f"{indices_file}. Skipping."
+        )
+        return
+
+    df = pd.read_csv(indices_file)
+    # ensure numeric
+    for col in ["mu_star", "sigma", "mu"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # sort by mu_star descending
+    df_sorted = df.sort_values(by="mu_star", ascending=False)
+
+    names = df_sorted["name"].values
+    mu_star = df_sorted["mu_star"].values
+    sigma = df_sorted["sigma"].values
+
+    # --- Bar plot for mu* and sigma ---
+    x = np.arange(len(names))
+    width = 0.35
+
+    plt.figure(figsize=(0.6 * len(names) + 2, 5))
+    plt.bar(x - width / 2, mu_star, width, label="mu* (importance)")
+    plt.bar(x + width / 2, sigma, width, label="sigma (nonlinearity/interactions)")
+
+    plt.xticks(x, names, rotation=45, ha="right")
+    plt.ylabel("Morris indices")
+    plt.title("Morris sensitivity (mu* and sigma)")
+    plt.legend()
+    plt.tight_layout()
+
+    bar_path = os.path.join(
+        out_dir, f"{project.setting.output}_morris{suffix}_mu_sigma_bar.png"
+    )
+    plt.savefig(bar_path, dpi=300)
+    plt.close()
+
+    # --- Scatter plot mu* vs sigma ---
+    plt.figure(figsize=(6, 5))
+    plt.scatter(mu_star, sigma, c="C0")
+    for n, x_val, y_val in zip(names, mu_star, sigma):
+        plt.text(x_val, y_val, n, fontsize=8, ha="left", va="bottom")
+
+    plt.xlabel("mu* (mean absolute elementary effect)")
+    plt.ylabel("sigma (standard deviation)")
+    plt.title("Morris: mu* vs sigma")
+    plt.tight_layout()
+
+    scatter_path = os.path.join(
+        out_dir, f"{project.setting.output}_morris{suffix}_mu_vs_sigma.png"
+    )
+    plt.savefig(scatter_path, dpi=300)
+    plt.close()
