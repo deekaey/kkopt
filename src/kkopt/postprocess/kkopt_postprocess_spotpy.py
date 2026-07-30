@@ -199,6 +199,19 @@ def plot_parameter_distribution_resampled(
         plt.close()
 
 
+def indent(elem, level=0):
+    """Recursively indent XML elements for pretty printing."""
+    i = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+        for elem in elem:
+            indent(elem, level + 1)
+    if level and (not elem.tail or not elem.tail.strip()):
+        elem.tail = i
+
 def plot_calibration_results(
     project,
     df_sorted: pd.DataFrame,
@@ -347,10 +360,12 @@ def plot_calibration_results(
             root,
             "par",
             name=name.replace("par_", ""),
+            name=name.replace("par", ""),
             value=str(value),
         )
 
     tree = ET.ElementTree(root)
+    indent(root)
     tree.write(
         os.path.join(output_dir, "best_parameters.xml"),
         encoding="utf-8",
