@@ -359,7 +359,6 @@ def plot_calibration_results(
         ET.SubElement(
             root,
             "par",
-            name=name.replace("par_", ""),
             name=name.replace("par", ""),
             value=str(value),
         )
