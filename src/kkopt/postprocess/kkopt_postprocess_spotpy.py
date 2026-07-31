@@ -212,6 +212,7 @@ def indent(elem, level=0):
     if level and (not elem.tail or not elem.tail.strip()):
         elem.tail = i
 
+
 def plot_calibration_results(
     project,
     df_sorted: pd.DataFrame,
@@ -343,7 +344,7 @@ def plot_calibration_results(
     plt.tight_layout()
 
     fig.savefig(
-        os.path.join(output_dir, "calibration_results.png"),
+        f"{project.setting.output}{suffix}_calibration_results.png",
         dpi=300,
         bbox_inches="tight",
     )
@@ -366,13 +367,13 @@ def plot_calibration_results(
     tree = ET.ElementTree(root)
     indent(root)
     tree.write(
-        os.path.join(output_dir, "best_parameters.xml"),
+        f"{project.setting.output}{suffix}_best_parameters.xml",
         encoding="utf-8",
         xml_declaration=True,
     )
 
 
-def spotpy_postprocess(project, method="mcmc"):
+def spotpy_postprocess( project, method="mcmc"):
 
     os.makedirs(project.output_dir, exist_ok=True)
 
@@ -454,7 +455,6 @@ def spotpy_postprocess(project, method="mcmc"):
         return
 
     plot_calibration_results( project, df_sorted, project.output_dir)
-
 
 
 
