@@ -380,18 +380,18 @@ def spotpy_postprocess( project, method="mcmc"):
     reps = getattr(project.setting, "repetitions", None)
     suffix = f"_N{reps}" if reps is not None else ""
 
-    # --- 1. Load base output and reconstruct observed_values as stacked evaluation ---
+    # --- 1. Load base output and reconstruct observed_values as stacked evaluation
     base_file = f"{project.setting.output}{suffix}_base.csv"
     base = pd.read_csv(base_file)
 
-    # Remove datetime for RMSE computation; we only need values
     if "datetime" in base.columns:
         base = base.drop(columns=["datetime"])
 
     observed_values = base["evaluation"].to_numpy()
 
-    # --- 2. Load SpotPy output and compute RMSE/R2 vs observed_values ---
-    like_type = "RMSE"  # or 'R2'
+    like_type = project.setting.likelihood
+
+    # --- 2. Load SpotPy output
     delimiter = ","
     df_file = f"{project.setting.output}{suffix}.csv"
     df = pd.read_csv(df_file, delimiter=delimiter)
@@ -400,22 +400,31 @@ def spotpy_postprocess( project, method="mcmc"):
     param_cols = [col for col in df.columns if col.startswith("par")]
     sim_cols = [col for col in df.columns if col.startswith("simulation_")]
 
-    if like_type == "R2":
+    if like_type == "r2":
         df = df.copy()  # defragment
-        df["R2"] = df[sim_cols].apply(
+        df["r2"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rsquared(
                 row.values, observed_values
             ),
             axis=1,
         )
         df_sorted = df.sort_values(by=like_col, ascending=False)
-    else:
+    elif like_type == "rmse":
         df = df.copy()  # defragment
-        df["RMSE"] = df[sim_cols].apply(
+        df["rmse"] = df[sim_cols].apply(
             lambda row: spotpy.objectivefunctions.rmse(row.values, observed_values),
             axis=1,
         )
-        df_sorted = df.sort_values(by="RMSE", ascending=True)
+        df_sorted = df.sort_values(by="rmse", ascending=True)
+    elif like_type == "rrmse":
+        df = df.copy()  # defragment
+        df["rrmse"] = df[sim_cols].apply(
+            lambda row: spotpy.objectivefunctions.rrmse(row.values, observed_values),
+            axis=1,
+        )
+        df_sorted = df.sort_values(by="rrmse", ascending=True)
+    else:
+        raise ValueError(f"Unknown output metric: {like_type}")
 
     # --- 3. Define subsets depending on method ---
     method_lower = method.lower()
